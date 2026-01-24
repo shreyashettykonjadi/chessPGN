@@ -1,83 +1,99 @@
-import os
-import sys
-from pathlib import Path
-from typing import List, Any
-import argparse
+from src.video_reader import VideoReader
+from src.preprocess import crop_top_half
+from src.corner_picker import pick_corners_interactive
+from src.corner_finder import find_board_corners
+import cv2
+import numpy as np
+from typing import Optional, Tuple
 
-# ensure src is importable
-SRC_DIR = Path(__file__).resolve().parent / "src"
-sys.path.insert(0, str(SRC_DIR))
+def warp_board(frame: np.ndarray, corners: np.ndarray, output_size: tuple = (800, 800)) -> np.ndarray:
+	"""Warp frame using provided corners to a square output."""
+	dst = np.array([
+		[0.0, 0.0],
+		[output_size[0] - 1.0, 0.0],
+		[output_size[0] - 1.0, output_size[1] - 1.0],
+		[0.0, output_size[1] - 1.0],
+	], dtype="float32")
+	M = cv2.getPerspectiveTransform(corners, dst)
+	return cv2.warpPerspective(frame, M, output_size)
 
-from video_reader import VideoReader
-from preprocess import Preprocess
-
-# downstream modules may be stubs; import safely
-try:
-    from board_detector import BoardDetector  # type: ignore
-    from fen_extractor import FENExtractor  # type: ignore
-    from move_inference import MoveInference  # type: ignore
-    from pgn_writer import PGNWriter  # type: ignore
-except Exception:
-    # downstream stubs missing or broken; provide minimal placeholders
-    class BoardDetector:
-        def detect_board(self, frame: Any):
-            return frame, (0, 0, 0, 0)
-
-    class FENExtractor:
-        def extract_fen(self, board_image: Any) -> str:
-            return "8/8/8/8/8/8/8/8 w - - 0 1"
-
-    class MoveInference:
-        def infer_moves(self, fens: List[str]) -> List[str]:
-            return []
-
-    class PGNWriter:
-        def write_pgn(self, moves: List[str], output_path: str) -> None:
-            with open(output_path, "w", encoding="utf-8") as f:
-                f.write("[Event \"Placeholder\"]\n\n")
-
-
-def parse_args():
-    p = argparse.ArgumentParser(description="Chess PGN from video (Phase 1: video input & preprocessing)")
-    p.add_argument("--video", "-v", required=True, help="Path to input video file")
-    p.add_argument("--interval-frames", type=int, default=None, help="Sample every N frames")
-    p.add_argument("--interval-seconds", type=float, default=None, help="Sample every N seconds")
-    p.add_argument("--max-frames", type=int, default=50, help="Max frames to read (for demo)")
-    p.add_argument("--resize", type=int, nargs=2, metavar=("W", "H"), default=None, help="Resize frames to W H")
-    p.add_argument("--gray", action="store_true", help="Convert frames to grayscale")
-    p.add_argument("--normalize", action="store_true", help="Normalize frames to [0,1]")
-    return p.parse_args()
-
+def get_board_corners(frame: np.ndarray, cached_corners: Optional[np.ndarray] = None) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+	"""
+	Get board corners using:
+	1. Cached corners (if provided)
+	2. Automatic detection (CameraChessWeb-inspired)
+	3. Manual selection (fallback)
+	
+	Returns (corners, debug_img)
+	"""
+	# Use cached corners if available
+	if cached_corners is not None:
+		return cached_corners, None
+	
+	# Try automatic detection
+	corners, debug_img = find_board_corners(frame, debug=True)
+	
+	if corners is not None:
+		print("Automatic board detection successful.")
+		return corners, debug_img
+	
+	# Show debug image if available
+	if debug_img is not None:
+		cv2.imshow("Auto-detection Debug", debug_img)
+		cv2.waitKey(1000)
+		cv2.destroyWindow("Auto-detection Debug")
+	
+	# Fall back to manual selection
+	print("Automatic board detection failed. Please select board corners manually.")
+	print("Click corners in order: Top-Left -> Top-Right -> Bottom-Right -> Bottom-Left")
+	manual_corners = pick_corners_interactive(frame)
+	return manual_corners, None
 
 def main():
-    args = parse_args()
+	reader = VideoReader(
+		path="data/videos/game_1.mp4",
+		sample_interval_frames=30,
+		max_frames=10
+	)
 
-    reader = VideoReader(
-        path=args.video,
-        sample_interval_frames=args.interval_frames,
-        sample_interval_seconds=args.interval_seconds,
-        max_frames=args.max_frames,
-    )
-    frames = reader.read()  # List of NumPy arrays
+	frames = reader.read()
+	print(f"Read {len(frames)} frames")
 
-    pre = Preprocess(resize=tuple(args.resize) if args.resize else None, to_gray=args.gray, normalize=args.normalize)
+	cached_corners: Optional[np.ndarray] = None
 
-    print(f"Read {len(frames)} frames from {args.video}")
-    for i, frame in enumerate(frames):
-        try:
-            proc = pre.process_frame(frame)
-        except Exception as e:
-            print(f"Skipping frame {i} due to error: {e}")
-            continue
-        # Demonstration: print basic info about processed frame
-        if hasattr(proc, "shape"):
-            print(f"Frame {i}: shape={proc.shape}, dtype={proc.dtype}")
-        else:
-            print(f"Frame {i}: processed (no shape)")
+	for i, frame in enumerate(frames):
+		cropped_frame = crop_top_half(frame)
+		
+		corners, debug_img = get_board_corners(cropped_frame, cached_corners)
+		
+		if corners is None:
+			print(f"Frame {i}: Corner selection cancelled. Exiting.")
+			return
+		
+		if cached_corners is None:
+			cached_corners = corners
+			print(f"Corners cached for subsequent frames:\n{corners}")
+		
+		board_img = warp_board(cropped_frame, corners)
+		
+		print(f"Frame {i}: Warped board shape = {board_img.shape}")
+		
+		if i == 0:
+			# Show debug and warped for first frame
+			if debug_img is not None:
+				cv2.imshow("Board Detection Debug", debug_img)
+				cv2.waitKey(0)
+			
+			cv2.imshow("Warped Board", board_img)
+			cv2.waitKey(0)
+		else:
+			cv2.imshow("Warped Board", board_img)
+			key = cv2.waitKey(500)
+			if key == ord('q'):
+				break
 
-    # leave rest of pipeline intact (stubs or real implementations)
-    print("Preprocessing demo complete.")
-
+	cv2.destroyAllWindows()
+	print("Processing complete.")
 
 if __name__ == "__main__":
-    main()
+	main()
