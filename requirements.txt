@@ -1,0 +1,6 @@
+# Core runtime dependencies for the project
+numpy>=1.24.0,<2.0
+opencv-python>=4.7.0,<5.0
+
+# If running in a headless environment (CI/server), you can use opencv-python-headless instead:
+# opencv-python-headless>=4.7.0,<5.0
