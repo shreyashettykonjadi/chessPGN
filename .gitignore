@@ -1,0 +1,30 @@
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ---- Virtual environments ----
+.venv/
+venv/
+env/
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.vscode/
+
+# ---- Data files (do not commit) ----
+data/videos/*
+data/frames/*
+
+# Keep folder structure
+!data/videos/.gitkeep
+!data/frames/.gitkeep
+
+# ---- Jupyter ----
+.ipynb_checkpoints/
+
+# ---- Logs / outputs ----
+*.log
+outputs/
