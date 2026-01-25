@@ -26,3 +26,20 @@ def extract_square(board_img, square_coords):
     """
     x1, y1, x2, y2 = square_coords
     return board_img[y1:y2, x1:x2]
+
+
+def square_from_point(x: int, y: int, board_size: int = 800) -> str:
+    """
+    Convert pixel coordinate (x,y) to algebraic square (e.g., 'e4').
+    Assumes board image is normalized, a-file on the left, rank 8 at y=0, size == board_size.
+    """
+    square_size = max(1, board_size // 8)
+    file_idx = int(x) // square_size
+    rank_idx = int(y) // square_size
+
+    file_idx = max(0, min(7, file_idx))
+    rank_idx = max(0, min(7, rank_idx))
+
+    file_char = "abcdefgh"[file_idx]
+    rank_num = 8 - rank_idx
+    return f"{file_char}{rank_num}"
