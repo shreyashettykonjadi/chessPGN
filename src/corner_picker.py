@@ -152,3 +152,13 @@ def pick_corners_interactive(img: np.ndarray, window_name: str = "Select Board C
     pts_arr = np.array(points, dtype="float32")
     ordered = _order_points(pts_arr)
     return ordered
+
+
+def reorder_corners_for_transform(ordered: np.ndarray) -> np.ndarray:
+    """
+    Convert corners ordered as (TL, TR, BR, BL) into (BR, BL, TL, TR),
+    which matches the target point order used by get_inv_transform.
+    """
+    if ordered.shape != (4, 2):
+        raise ValueError("ordered must be a 4x2 array")
+    return ordered[[2, 3, 0, 1]]

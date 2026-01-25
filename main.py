@@ -11,10 +11,95 @@ import numpy as np
 SRC_DIR = Path(__file__).resolve().parent / "src"
 sys.path.insert(0, str(SRC_DIR))
 
-from video_reader import VideoReader
-from preprocess import crop_top_half
-from corner_picker import pick_corners_interactive
-from corner_finder import find_board_corners
+from video_reader import VideoReader  # type: ignore
+from preprocess import crop_top_half  # type: ignore
+from corner_picker import pick_corners_interactive  # type: ignore
+from corner_finder import find_board_corners  # type: ignore
+
+def order_corners_tl_tr_br_bl(pts: np.ndarray) -> np.ndarray:
+    # Robustly order corners: top-left, top-right, bottom-right, bottom-left
+    # Sort by y (top two first), then by x within each row.
+    pts = pts.astype(np.float32)
+    idx_by_y = np.argsort(pts[:, 1])
+    top = pts[idx_by_y[:2]]
+    bottom = pts[idx_by_y[2:]]
+
+    top_sorted = top[np.argsort(top[:, 0])]
+    bottom_sorted = bottom[np.argsort(bottom[:, 0])]
+
+    tl, tr = top_sorted[0], top_sorted[1]
+    bl, br = bottom_sorted[0], bottom_sorted[1]
+    return np.array([tl, tr, br, bl], dtype=np.float32)
+
+
+def is_square_light(board_img: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> bool:
+    """Check if the square region is light (True) or dark (False) based on mean intensity."""
+    cx = (x1 + x2) // 2
+    cy = (y1 + y2) // 2
+    margin = 10
+    region = board_img[max(0, cy - margin):min(board_img.shape[0], cy + margin), 
+                       max(0, cx - margin):min(board_img.shape[1], cx + margin)]
+    if region.size == 0:
+        return False
+    if len(region.shape) == 3:
+        region = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+    mean_intensity = np.mean(region)
+    return bool(mean_intensity > 127)
+
+
+def check_board_orientation(board_img: np.ndarray) -> bool:
+    """
+    Return True if the board is oriented with a1 dark, a8 light, h1 light, h8 dark.
+    Uses relative brightness of the four corner squares (no fixed threshold).
+    """
+    h, w = board_img.shape[:2]
+    board_size = min(h, w)
+    sq = board_size // 8
+
+    def mean_at_square(x1, y1, x2, y2):
+        cx = (x1 + x2) // 2
+        cy = (y1 + y2) // 2
+        margin = max(3, sq // 16)
+        region = board_img[max(0, cy - margin):min(h, cy + margin),
+                           max(0, cx - margin):min(w, cx + margin)]
+        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY) if len(region.shape) == 3 else region
+        return float(np.mean(gray)) if gray.size else 0.0
+
+    a1 = mean_at_square(0, board_size - sq, sq, board_size)
+    a8 = mean_at_square(0, 0, sq, sq)
+    h1 = mean_at_square(board_size - sq, board_size - sq, board_size, board_size)
+    h8 = mean_at_square(board_size - sq, 0, board_size, sq)
+
+    vals = {'a1': a1, 'a8': a8, 'h1': h1, 'h8': h8}
+    # Two darkest should be a1 and h8; two brightest should be a8 and h1
+    sorted_keys = sorted(vals, key=lambda k: vals[k])
+    darkest = set(sorted_keys[:2])
+    brightest = set(sorted_keys[2:])
+    ok = darkest == {'a1', 'h8'} and brightest == {'a8', 'h1'}
+
+    # Require a minimal contrast to avoid noise (adaptive)
+    contrast = (np.mean([vals[k] for k in brightest]) - np.mean([vals[k] for k in darkest]))
+    return ok
+
+
+def normalize_board_orientation(board_img: np.ndarray) -> np.ndarray:
+    """
+    Rotate by 0/90/180/270 to achieve typical orientation (a1 dark, a8 light, h1 light, h8 dark).
+    """
+    candidates = [
+        board_img,
+        cv2.rotate(board_img, cv2.ROTATE_90_CLOCKWISE),
+        cv2.rotate(board_img, cv2.ROTATE_180),
+        cv2.rotate(board_img, cv2.ROTATE_90_COUNTERCLOCKWISE),
+    ]
+    for img in candidates:
+        try:
+            if check_board_orientation(img):
+                return img
+        except Exception:
+            continue
+    # Fallback: keep original if no confident orientation found
+    return board_img
 
 
 def warp_board(frame: np.ndarray, corners: np.ndarray, output_size: Tuple[int, int] = (800, 800)) -> Optional[np.ndarray]:
@@ -42,7 +127,7 @@ def warp_board(frame: np.ndarray, corners: np.ndarray, output_size: Tuple[int, i
         return None
     
     # Ensure corners are properly ordered and valid
-    src_pts = corners.reshape(4, 2).astype(np.float32)
+    src_pts = order_corners_tl_tr_br_bl(corners.astype(np.float32))
 
     # Define destination corners for square output
     width, height = output_size
@@ -60,7 +145,7 @@ def warp_board(frame: np.ndarray, corners: np.ndarray, output_size: Tuple[int, i
     except Exception as e:
         print(f"Error during perspective warping: {e}")
         return None
-
+    
 
 def get_board_corners(
     frame: np.ndarray, 
@@ -85,13 +170,7 @@ def get_board_corners(
         print("Automatic board detection successful.")
         return corners, debug_img
 
-    # Show debug image if available
-    if debug_img is not None:
-        cv2.imshow("Auto-detection Debug", debug_img)
-        cv2.waitKey(1000)
-        cv2.destroyWindow("Auto-detection Debug")
-
-    # Fall back to manual selection
+    # Do not show UI here; main() controls all visualization
     print("Automatic board detection failed. Please select board corners manually.")
     print("Click corners in order: Top-Left -> Top-Right -> Bottom-Right -> Bottom-Left")
     manual_corners = pick_corners_interactive(frame)
@@ -106,6 +185,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interval", type=int, default=30, help="Sample every N frames (default: 30)")
     parser.add_argument("--max-frames", type=int, default=10, help="Maximum frames to process (default: 10)")
     parser.add_argument("--no-debug", action="store_true", help="Skip debug windows and visualization")
+    # removed --rotate temporary flag
     return parser.parse_args()
 
 
@@ -141,11 +221,16 @@ def main(args: argparse.Namespace) -> None:
             print(f"Frame {i}: Warping failed. Skipping frame.")
             continue
 
+        # Rotate 90° counter-clockwise to match standard chess orientation
+        board_img = cv2.rotate(board_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
         print(f"Frame {i}: Warped board shape = {board_img.shape}")
+
+        if i == 0:
+            cv2.imwrite("warped_board.png", board_img)  # temp verification
 
         if not args.no_debug:
             if i == 0:
-                # Show debug and warped for first frame
                 if debug_img is not None:
                     cv2.imshow("Board Detection Debug", debug_img)
                     cv2.waitKey(0)
@@ -157,7 +242,6 @@ def main(args: argparse.Namespace) -> None:
                 key = cv2.waitKey(500)
                 if key == ord('q'):
                     break
-
     if not args.no_debug:
         cv2.destroyAllWindows()
     print("Processing complete.")
