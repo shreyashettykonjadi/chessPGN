@@ -1,4 +1,5 @@
-import cv2
+import cv2  # type: ignore
+# pyright: reportAttributeAccessIssue=false
 import numpy as np
 from typing import List, Tuple, Optional
 
@@ -33,7 +34,7 @@ def _validate_points(points: List[Tuple[int, int]], img_shape: Tuple[int, int]) 
     
     # Check polygon area (must be > 1% of image area)
     img_area = float(img_shape[0] * img_shape[1])
-    poly_area = cv2.contourArea(pts_arr)
+    poly_area = abs(cv2.contourArea(pts_arr.reshape(-1, 1, 2)))
     if poly_area < 0.01 * img_area:
         return False, "Selected area is too small. Please reselect."
     
@@ -111,7 +112,7 @@ def pick_corners_interactive(img: np.ndarray, window_name: str = "Select Board C
         
         # Validate when 4 points collected
         if len(points) == 4:
-            is_valid, error_msg = _validate_points(points, img.shape[:2])
+            is_valid, error_msg = _validate_points(points, (int(img.shape[0]), int(img.shape[1])))
             if is_valid:
                 # validation passed, wait for confirmation
                 validation_msg = "Selection valid. Press any key to confirm."

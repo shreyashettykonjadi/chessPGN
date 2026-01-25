@@ -1,6 +1,50 @@
-# Core runtime dependencies for the project
+# ============================================
+# Chess Video to PGN Converter - Dependencies
+# ============================================
+
+# --- Core Runtime Dependencies ---
 numpy>=1.24.0,<2.0
 opencv-python>=4.7.0,<5.0
 
-# If running in a headless environment (CI/server), you can use opencv-python-headless instead:
+# For headless environments (servers, CI), use:
 # opencv-python-headless>=4.7.0,<5.0
+
+# --- Chess Logic & Validation ---
+# Required for move inference and validation
+python-chess>=1.999
+
+# --- Deep Learning (Optional, for FEN extraction) ---
+# Uncomment if implementing CNN-based piece recognition
+# torch>=2.0.0,<3.0
+# torchvision>=0.15.0,<1.0
+
+# --- Image Processing (Optional) ---
+Pillow>=9.0.0,<11.0
+
+# --- Data Science & Visualization (Development) ---
+# Uncomment for analysis and debugging
+# matplotlib>=3.7.0,<4.0
+# seaborn>=0.12.0,<1.0
+# pandas>=2.0.0,<3.0
+
+# --- Interactive Development (Optional) ---
+# jupyter>=1.0.0
+# ipykernel>=6.0.0
+# ipywidgets>=8.0.0
+
+# --- Testing (Development) ---
+# pytest>=7.0.0,<8.0
+# pytest-cov>=4.0.0,<5.0
+
+# --- Code Quality (Development) ---
+# black>=23.0.0  # Code formatting
+# flake8>=6.0.0  # Linting
+# mypy>=1.0.0    # Type checking
+
+# --- Additional CV Tools (Optional) ---
+# scikit-image>=0.20.0  # Advanced image processing
+# imutils>=0.5.4        # Convenience functions for OpenCV
+
+# --- OCR (Optional, for clock/player names) ---
+# pytesseract>=0.3.10
+# easyocr>=1.7.0
