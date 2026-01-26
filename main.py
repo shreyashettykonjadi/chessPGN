@@ -7,6 +7,10 @@ import cv2  # type: ignore
 # pyright: reportAttributeAccessIssue=false
 import numpy as np
 
+from src.fen_builder import build_fen_board
+from src.piece_mapper import map_pieces_to_squares
+
+
 # Ensure src is importable
 SRC_DIR = Path(__file__).resolve().parent / "src"
 sys.path.insert(0, str(SRC_DIR))
@@ -193,8 +197,8 @@ def main(args: argparse.Namespace) -> None:
     # Initialize video reader
     reader = VideoReader(
         path=args.video,
-        sample_interval_frames=args.interval,
-        max_frames=args.max_frames
+        sample_interval_frames=15,
+        max_frames=None
     )
 
     frames = reader.read()
