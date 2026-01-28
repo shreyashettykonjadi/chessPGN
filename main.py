@@ -1,15 +1,26 @@
+# pyright: reportMissingImports=false
+# pyright: reportAttributeAccessIssue=false
+
 import os
 import sys
+import traceback
 from pathlib import Path
+
+SRC_DIR = Path(__file__).resolve().parent / "src"
+sys.path.insert(0, str(SRC_DIR))
+
+# now safe to import everything
 from typing import Optional, Tuple
 import argparse
 import cv2  # type: ignore
-# pyright: reportAttributeAccessIssue=false
 import numpy as np
 
 from src.fen_builder import build_fen_board
 from src.piece_mapper import map_pieces_to_squares
-
+from piece_decoder import decode_leyolo_outputs  # type: ignore
+from detectors.piece_detector import preprocess_board, run_inference  # type: ignore
+from src.fen_extractor import FENExtractor
+from src.grid import square_from_point
 
 # Ensure src is importable
 SRC_DIR = Path(__file__).resolve().parent / "src"
@@ -19,6 +30,12 @@ from video_reader import VideoReader  # type: ignore
 from preprocess import crop_top_half  # type: ignore
 from corner_picker import pick_corners_interactive  # type: ignore
 from corner_finder import find_board_corners  # type: ignore
+
+# Insert warm-up and filtering parameters near top-level (just after imports / constants)
+WARMUP_FRAMES = 12           # ignore first N frames for FEN output/logging
+CONF_THRESHOLD = 0.5         # minimum confidence to accept a raw detection
+ENABLE_CHESS_PRIOR = True    # apply light gating during warm-up only
+CENTRAL_SQUARES = {"e4", "d4", "e5", "d5"}
 
 def order_corners_tl_tr_br_bl(pts: np.ndarray) -> np.ndarray:
     # Robustly order corners: top-left, top-right, bottom-right, bottom-left
@@ -205,6 +222,8 @@ def main(args: argparse.Namespace) -> None:
     print(f"Read {len(frames)} frames")
 
     cached_corners: Optional[np.ndarray] = None
+    prev_fen: Optional[str] = None  # Track previous FEN
+    fen_extractor = FENExtractor(window_size=5, strict_validation=True)  # temporal smoothing + validation
 
     for i, frame in enumerate(frames):
         cropped_frame = crop_top_half(frame)
@@ -227,6 +246,68 @@ def main(args: argparse.Namespace) -> None:
 
         # Rotate 90° counter-clockwise to match standard chess orientation
         board_img = cv2.rotate(board_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+        # --- Phase 4.5: Detect pieces, map to squares, and build FEN ---
+        try:
+            input_tensor = preprocess_board(board_img)
+            print(f"[main] Input tensor shape: {input_tensor.shape}")
+            
+            outputs = run_inference(input_tensor)
+            raw_output = outputs[0] if isinstance(outputs, list) else outputs
+            
+            print(f"[main] Raw output type: {type(raw_output)}")
+            print(f"[main] Raw output shape: {raw_output.shape}")
+            print(f"[main] Raw output dtype: {raw_output.dtype}")
+            
+            detections = decode_leyolo_outputs(raw_output)
+            # Raw debug logging (keep but do not treat as final output)
+            print(f"[main][raw] Detections count: {len(detections)}")
+            if detections:
+                print(f"[main][raw] Sample detection: {detections[0]}")
+
+            # Confidence filtering (Phase 4.0 filter, before mapping)
+            def _conf(d):
+                return float(d.get("score", 1.0)) if isinstance(d, dict) else 1.0
+            filtered = [d for d in detections if _conf(d) >= CONF_THRESHOLD]
+            print(f"[main][filtered] Kept after confidence filter: {len(filtered)}")
+
+            # Map filtered detections to squares
+            piece_map_candidate = map_pieces_to_squares(filtered, board_size=800)
+
+            # Build per-square confidence using detection centers (same mapping as piece_map)
+            confidences_by_square = {}
+            for d in filtered:
+                bbox = d.get("bbox")
+                if not bbox:
+                    continue
+                x1, y1, x2, y2 = bbox
+                cx = (int(x1) + int(x2)) // 2
+                cy = (int(y1) + int(y2)) // 2
+                sq = square_from_point(cx, cy, board_size=800)
+                score = float(d.get("score", 1.0))
+                # keep max confidence per square
+                prev = confidences_by_square.get(sq, 0.0)
+                if score > prev:
+                    confidences_by_square[sq] = score
+
+            # Feed detections to Phase 4.5 (fills temporal buffer and validates)
+            stabilized_fen = fen_extractor.process_detections(piece_map_candidate, confidences_by_square)
+
+            # Warm-up: do not log or use FEN; allow buffers to fill
+            if i < WARMUP_FRAMES:
+                print(f"[main][warmup] Frame {i}: buffering, skipping FEN output")
+            else:
+                # After warm-up: log only stabilized FEN (no raw piece maps as final output)
+                if stabilized_fen != prev_fen:
+                    print(f"[main][stabilized] FEN: {stabilized_fen}")
+                    prev_fen = stabilized_fen
+
+        except Exception as e:
+            print(f"[main] ERROR in Phase 4.5: {e}")
+            traceback.print_exc()
+            print("[main] Stopping due to error for inspection.")
+            break
+        # --- End Phase 4.5 ---
 
         print(f"Frame {i}: Warped board shape = {board_img.shape}")
 
