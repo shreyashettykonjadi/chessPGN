@@ -6,6 +6,7 @@ import sys
 import traceback
 from pathlib import Path
 import hashlib  # Add at top with other imports
+import onnxruntime as ort
 
 SRC_DIR = Path(__file__).resolve().parent / "src"
 sys.path.insert(0, str(SRC_DIR))
@@ -24,6 +25,7 @@ from detectors.piece_detector import preprocess_board, run_inference  # type: ig
 from src.fen_extractor import FENExtractor
 from src.fen_timeline import FENTimeline
 from src.grid import square_from_point
+from temporal_smoother import SmoothedBoard, TemporalSmoother
 
 # Ensure src is importable
 SRC_DIR = Path(__file__).resolve().parent / "src"
@@ -46,6 +48,25 @@ debug_move_inference = True
 debug_fen_timeline = True  # Enable FEN transition validation debug
 debug_pipeline_trace = True  # Trace raw model output variation
 
+# ONNX model path
+ONNX_MODEL_PATH = Path(__file__).resolve().parents[2] / "models" / "pieces" / "480M_leyolo_pieces.onnx"
+
+_session = None
+_input_name = None
+_output_names = None
+
+def run_inference(input_tensor: np.ndarray) -> list:
+    global _session, _input_name, _output_names
+    if _session is None:
+        PROJECT_ROOT = Path(__file__).resolve().parents[2]
+        model_path = PROJECT_ROOT / "models" / "pieces" / "480M_leyolo_pieces.onnx"
+        _session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+        _input_name = _session.get_inputs()[0].name
+        _output_names = [o.name for o in _session.get_outputs()]
+        # Diagnostic: confirm model file and IO names
+        print(f"[infer] Loaded ONNX model: {model_path}")
+        print(f"[infer] Input name: {_input_name}, output(s): {_output_names}")
+    return _session.run(_output_names, {_input_name: input_tensor})
 
 def get_board_fen(full_fen: str) -> str:
     """Extract only the board portion from a full FEN string."""
@@ -452,14 +473,6 @@ def main(args: argparse.Namespace) -> None:
             outputs = run_inference(input_tensor)
             raw_output = outputs[0] if isinstance(outputs, list) else outputs
 
-            # DIAGNOSTIC: hash raw ONNX output to verify per-frame variation
-            try:
-                raw_arr = raw_output if isinstance(raw_output, np.ndarray) else np.array(raw_output)
-                raw_hash = hashlib.md5(raw_arr.tobytes()).hexdigest()[:8]
-            except Exception:
-                raw_hash = "err"
-            print(f"[trace] frame={i} raw_output_hash={raw_hash}")
-
             detections = decode_leyolo_outputs(raw_output)
 
             def _conf(d):
@@ -491,17 +504,17 @@ def main(args: argparse.Namespace) -> None:
                 # Feed to extractor to fill temporal buffer, but don't log
                 fen_extractor.process_detections(piece_map_candidate)
             else:
-                # Post warm-up: collect stabilized FENs via timeline using metadata-aware call
-                extraction = fen_extractor.process_detections_with_metadata(piece_map_candidate)
-                if not extraction.get("is_valid", False):
-                    # Do not pass fallback FENs to the timeline; wait until a truly valid board appears
-                    print("[Trace] Invalid board detected, previously masked as fallback")
-                else:
-                    raw_fen = extraction.get("fen")
-                    fen = str(raw_fen) if isinstance(raw_fen, str) else None
-                    new_fen = fen_timeline.collect(fen)
-                    if new_fen:
-                        print(f"[STATE CHANGE] {new_fen}")
+                # Post warm-up: collect stabilized FENs via timeline
+                fen = fen_extractor.process_detections(piece_map_candidate)
+                
+                # --- DIAGNOSTIC: trace extractor output vs timeline ---
+                if debug_pipeline_trace:
+                    fen_hash = hashlib.md5(fen.encode()).hexdigest()[:8] if fen else "None"
+                    print(f"[trace] frame={i} extractor_fen_hash={fen_hash}")
+                
+                new_fen = fen_timeline.collect(fen)
+                if new_fen:
+                    print(f"[STATE CHANGE] {new_fen}")
 
         except Exception as e:
             print(f"[main] ERROR in Phase 4.5: {e}")

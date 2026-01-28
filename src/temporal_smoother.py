@@ -19,7 +19,7 @@ class TemporalSmoother:
     
     def __init__(self, window_size: int = 5, min_hits: int = 2):
         self.window_size = window_size
-        self.min_hits = max(2, int(min_hits))  # ensure not single-frame
+        self.min_hits = max(1, int(min_hits))  # allow min_hits=1 for responsive mode
         self.history: deque = deque(maxlen=window_size)
     
     def add_frame(self, squares: Dict[str, str]) -> SmoothedBoard:

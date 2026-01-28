@@ -31,7 +31,9 @@ class FENExtractor:
 
     def __init__(self, window_size: int = 5, strict_validation: bool = True):
         self.validator = BoardValidator(strict_limits=strict_validation)
-        self.smoother = TemporalSmoother(window_size=window_size)
+        # Use min_hits=1 to be more responsive to board changes
+        # Let FENTimeline validator handle noise rejection
+        self.smoother = TemporalSmoother(window_size=window_size, min_hits=1)
         self.last_valid_state: Optional[BoardState] = None
     
     def extract_fen(self, board_image: Any) -> str:
@@ -129,6 +131,38 @@ class FENExtractor:
             return self._build_full_fen(self.last_valid_state)
         else:
             return self.EMPTY_FEN
+
+    # New: process detections but return metadata and do NOT fallback to last_valid_state when invalid
+    def process_detections_with_metadata(self, detections: Dict[str, str],
+										  confidences: Optional[Dict[str, float]] = None) -> Dict[str, object]:
+        """
+        Process raw detections and return dict:
+		  { "fen": Optional[str], "is_valid": bool, "errors": Optional[List[str]] }
+
+        If the board is invalid, fen is None and is_valid is False (no fallback).
+        """
+        # Convert to Detection objects
+        detection_list = []
+        for square, piece in detections.items():
+            conf = confidences.get(square, 1.0) if confidences else 1.0
+            detection_list.append(Detection(square=square, piece=piece, confidence=conf))
+
+        # Resolve conflicts
+        resolved = self.validator.resolve_conflicts(detection_list)
+
+        # Temporal smoothing
+        smoothed = self.smoother.add_frame(resolved)
+
+        # Validate
+        is_valid, errors = self.validator.validate(smoothed.squares)
+
+        if is_valid:
+            board_state = BoardState(squares=smoothed.squares, is_valid=True)
+            self.last_valid_state = board_state
+            return {"fen": self._build_full_fen(board_state), "is_valid": True, "errors": []}
+        else:
+            # Do NOT return fallback FEN here; signal invalid so caller can wait/skip
+            return {"fen": None, "is_valid": False, "errors": errors}
     
     def _detect_pieces(self, board_image: Any) -> List[Detection]:
         """

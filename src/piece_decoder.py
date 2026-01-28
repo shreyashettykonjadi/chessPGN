@@ -17,8 +17,7 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
 def decode_leyolo_outputs(
     raw_output: np.ndarray,
     conf_threshold: float = 0.25,
-    top_k: Optional[int] = 100,
-    debug: bool = False  # Add debug flag
+    top_k: Optional[int] = 100
 ) -> List[Dict[str, Any]]:
     # Validate input shape
     if raw_output.ndim != 3:
@@ -53,9 +52,7 @@ def decode_leyolo_outputs(
     confidences_all = max_class_probs_all
     keep_mask = confidences_all >= conf_threshold
     num_kept = int(np.sum(keep_mask))
-    # Guard log with debug flag
-    if debug:
-        print(f"[decode] Anchors above threshold ({conf_threshold}): {num_kept} / {len(keep_mask)}")
+    print(f"[decode] Anchors above threshold ({conf_threshold}): {num_kept} / {len(keep_mask)}")
     
     detections: List[Dict[str, Any]] = []
     if num_kept == 0:
@@ -70,9 +67,8 @@ def decode_leyolo_outputs(
     else:
         selected = kept_indices[order]
 
-    # Guard log with debug flag
-    if debug:
-        print(f"[decode] anchors above threshold: {num_kept}, after top_k: {len(selected)}")
+    # Single concise log per frame (after applying top_k)
+    print(f"[decode] anchors above threshold: {num_kept}, after top_k: {len(selected)}")
 
     # Slice arrays by selected indices
     boxes_raw = boxes_raw_all[selected]
