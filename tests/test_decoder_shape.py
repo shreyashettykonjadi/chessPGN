@@ -7,8 +7,8 @@ def test_decoder_shape_and_classes():
 
     detections = decode_leyolo_outputs(raw, conf_threshold=0.0)
 
-    # Check labels count (MUST be 11)
-    assert len(LABELS) == 11, f"Expected 11 labels, got {len(LABELS)}"
+    # Check labels count (MUST be 12: 6 piece types × 2 colors)
+    assert len(LABELS) == 12, f"Expected 12 labels, got {len(LABELS)}"
 
     # Each detection must have required keys
     for det in detections:

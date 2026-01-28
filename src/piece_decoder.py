@@ -1,5 +1,5 @@
 import numpy as np
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 # ChessCam uses 12 classes: ["b", "k", "n", "p", "q", "r", "B", "K", "N", "P", "Q", "R"]
 # Mapped to readable names
@@ -14,7 +14,12 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
     x = np.clip(x, -500, 500)  # Prevent overflow
     return 1.0 / (1.0 + np.exp(-x))
 
-def decode_leyolo_outputs(raw_output: np.ndarray, conf_threshold: float = 0.25) -> List[Dict[str, Any]]:
+def decode_leyolo_outputs(
+    raw_output: np.ndarray,
+    conf_threshold: float = 0.25,
+    top_k: Optional[int] = 100,
+    debug: bool = False  # Add debug flag
+) -> List[Dict[str, Any]]:
     # Validate input shape
     if raw_output.ndim != 3:
         raise ValueError(f"Expected 3D tensor, got ndim={raw_output.ndim}")
@@ -24,8 +29,6 @@ def decode_leyolo_outputs(raw_output: np.ndarray, conf_threshold: float = 0.25) 
     num_channels = raw_output.shape[1]
     num_anchors = raw_output.shape[2]
     
-    print(f"[decode] Input shape: {raw_output.shape} (batch=1, channels={num_channels}, anchors={num_anchors})")
-    
     # Layout: [cx, cy, w, h, class_logits...] — NO separate objectness for this model
     # ChessCam: channels = 4 (box) + 12 (classes) = 16
     num_classes = num_channels - 4
@@ -33,34 +36,48 @@ def decode_leyolo_outputs(raw_output: np.ndarray, conf_threshold: float = 0.25) 
     if num_classes != len(LABELS):
         raise ValueError(f"Model has {num_classes} classes but LABELS has {len(LABELS)} entries")
     
-    print(f"[decode] Detected {num_classes} classes")
-    
     # Transpose from (1, 16, 2835) to (2835, 16)
     arr = raw_output.squeeze(0).astype(np.float32).T  # shape (2835, 16)
     
     # Extract box coordinates (normalized to model input 480x288)
-    boxes_raw = arr[:, 0:4]  # cx, cy, w, h
+    boxes_raw_all = arr[:, 0:4]  # cx, cy, w, h
     
     # Extract class logits and apply sigmoid
-    class_logits = arr[:, 4:4 + num_classes]
-    class_probs = _sigmoid(class_logits)
+    class_logits_all = arr[:, 4:4 + num_classes]
+    class_probs_all = _sigmoid(class_logits_all)
     
     # Confidence = max class probability (no separate objectness)
-    max_class_probs = class_probs.max(axis=1)
-    class_indices = class_probs.argmax(axis=1)
+    max_class_probs_all = class_probs_all.max(axis=1)
+    class_indices_all = class_probs_all.argmax(axis=1)
     
-    confidences = max_class_probs
-    keep = confidences >= conf_threshold
-    
-    print(f"[decode] Anchors above threshold ({conf_threshold}): {np.sum(keep)} / {len(keep)}")
+    confidences_all = max_class_probs_all
+    keep_mask = confidences_all >= conf_threshold
+    num_kept = int(np.sum(keep_mask))
+    # Guard log with debug flag
+    if debug:
+        print(f"[decode] Anchors above threshold ({conf_threshold}): {num_kept} / {len(keep_mask)}")
     
     detections: List[Dict[str, Any]] = []
-    if not np.any(keep):
+    if num_kept == 0:
         return detections
     
-    boxes_raw = boxes_raw[keep]
-    confidences = confidences[keep]
-    class_indices = class_indices[keep]
+    # Convert mask to indices and select top-k by confidence
+    kept_indices = np.nonzero(keep_mask)[0]
+    kept_scores = confidences_all[kept_indices]
+    order = np.argsort(-kept_scores)  # descending
+    if top_k is not None and top_k > 0:
+        selected = kept_indices[order[:min(top_k, len(order))]]
+    else:
+        selected = kept_indices[order]
+
+    # Guard log with debug flag
+    if debug:
+        print(f"[decode] anchors above threshold: {num_kept}, after top_k: {len(selected)}")
+
+    # Slice arrays by selected indices
+    boxes_raw = boxes_raw_all[selected]
+    confidences = confidences_all[selected]
+    class_indices = class_indices_all[selected]
     
     # Convert from model input coords (480x288) to board image coords (800x800)
     # Model input: width=480, height=288

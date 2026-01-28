@@ -10,16 +10,18 @@ SRC_DIR = Path(__file__).resolve().parent / "src"
 sys.path.insert(0, str(SRC_DIR))
 
 # now safe to import everything
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 import argparse
 import cv2  # type: ignore
 import numpy as np
+import chess  # python-chess library
 
 from src.fen_builder import build_fen_board
 from src.piece_mapper import map_pieces_to_squares
 from piece_decoder import decode_leyolo_outputs  # type: ignore
 from detectors.piece_detector import preprocess_board, run_inference  # type: ignore
 from src.fen_extractor import FENExtractor
+from src.fen_timeline import FENTimeline
 from src.grid import square_from_point
 
 # Ensure src is importable
@@ -32,10 +34,80 @@ from corner_picker import pick_corners_interactive  # type: ignore
 from corner_finder import find_board_corners  # type: ignore
 
 # Insert warm-up and filtering parameters near top-level (just after imports / constants)
-WARMUP_FRAMES = 12           # ignore first N frames for FEN output/logging
+WARMUP_FRAMES = 8            # reduced from 12 since we sample more densely now
 CONF_THRESHOLD = 0.5         # minimum confidence to accept a raw detection
 ENABLE_CHESS_PRIOR = True    # apply light gating during warm-up only
 CENTRAL_SQUARES = {"e4", "d4", "e5", "d5"}
+
+# Temporary debug toggle for move inference diagnostics
+debug_move_inference = True
+debug_fen_timeline = True  # Enable FEN transition validation debug
+
+
+def get_board_fen(full_fen: str) -> str:
+    """Extract only the board portion from a full FEN string."""
+    return full_fen.split()[0]
+
+
+def infer_moves_from_fens(fen_history: List[str], debug: bool = False) -> List[str]:
+    """
+    Infer chess moves from consecutive FEN positions.
+
+    When debug=True, print diagnostics per FEN pair:
+      - previous FEN
+      - current FEN
+      - number of legal moves tried
+      - message when no legal move matched
+    """
+    if len(fen_history) < 2:
+        return []
+    
+    move_list: List[str] = []
+    
+    for i in range(len(fen_history) - 1):
+        fen_before = fen_history[i]
+        fen_after = fen_history[i + 1]
+        
+        # Extract board-only portions for comparison
+        target_board = get_board_fen(fen_after)
+        
+        try:
+            board = chess.Board(fen_before)
+        except ValueError:
+            # Invalid FEN, skip this pair
+            if debug:
+                print(f"[move-debug] Invalid fen_before at index {i}: {fen_before}")
+            continue
+        
+        # Materialize legal moves to count and iterate safely
+        legal_moves = list(board.legal_moves)
+        if debug:
+            print(f"[move-debug] Pair {i} -> {i+1}")
+            print(f"[move-debug] prev_fen: {fen_before}")
+            print(f"[move-debug] curr_fen: {fen_after}")
+            print(f"[move-debug] legal moves to try: {len(legal_moves)}")
+
+        matching_moves: List[chess.Move] = []
+
+        for move in legal_moves:
+            board.push(move)
+            result_board = get_board_fen(board.fen())
+            board.pop()
+
+            if result_board == target_board:
+                matching_moves.append(move)
+
+        if len(matching_moves) == 1:
+            move_list.append(matching_moves[0].uci())
+        else:
+            if debug:
+                if len(matching_moves) == 0:
+                    print("[move-debug] No legal move matched this FEN transition")
+                else:
+                    print(f"[move-debug] Ambiguous: {len(matching_moves)} matching moves (skipping)")
+
+    return move_list
+
 
 def order_corners_tl_tr_br_bl(pts: np.ndarray) -> np.ndarray:
     # Robustly order corners: top-left, top-right, bottom-right, bottom-left
@@ -188,12 +260,12 @@ def get_board_corners(
     corners, debug_img = find_board_corners(frame, debug=True)
 
     if corners is not None:
-        print("Automatic board detection successful.")
+        # print("Automatic board detection successful.")
         return corners, debug_img
 
     # Do not show UI here; main() controls all visualization
-    print("Automatic board detection failed. Please select board corners manually.")
-    print("Click corners in order: Top-Left -> Top-Right -> Bottom-Right -> Bottom-Left")
+    # print("Automatic board detection failed. Please select board corners manually.")
+    # print("Click corners in order: Top-Left -> Top-Right -> Bottom-Right -> Bottom-Left")
     manual_corners = pick_corners_interactive(frame)
     return manual_corners, None
 
@@ -211,19 +283,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def main(args: argparse.Namespace) -> None:
-    # Initialize video reader
+    # Initialize video reader with denser sampling for better move detection
     reader = VideoReader(
         path=args.video,
-        sample_interval_frames=15,
+        sample_interval_frames=3,  # changed from 15 -> 3 for denser sampling
         max_frames=None
     )
 
     frames = reader.read()
-    print(f"Read {len(frames)} frames")
 
     cached_corners: Optional[np.ndarray] = None
-    prev_fen: Optional[str] = None  # Track previous FEN
-    fen_extractor = FENExtractor(window_size=5, strict_validation=True)  # temporal smoothing + validation
+    fen_timeline = FENTimeline(validate_transitions=True, debug=debug_fen_timeline)
+    fen_extractor = FENExtractor(window_size=5, strict_validation=True)
 
     for i, frame in enumerate(frames):
         cropped_frame = crop_top_half(frame)
@@ -231,17 +302,14 @@ def main(args: argparse.Namespace) -> None:
         corners, debug_img = get_board_corners(cropped_frame, cached_corners)
 
         if corners is None:
-            print(f"Frame {i}: Corner selection cancelled. Exiting.")
             break
 
         if cached_corners is None:
             cached_corners = corners
-            print(f"Corners cached for subsequent frames:\n{corners}")
 
         board_img = warp_board(cropped_frame, corners)
 
         if board_img is None:
-            print(f"Frame {i}: Warping failed. Skipping frame.")
             continue
 
         # Rotate 90° counter-clockwise to match standard chess orientation
@@ -250,76 +318,51 @@ def main(args: argparse.Namespace) -> None:
         # --- Phase 4.5: Detect pieces, map to squares, and build FEN ---
         try:
             input_tensor = preprocess_board(board_img)
-            print(f"[main] Input tensor shape: {input_tensor.shape}")
-            
             outputs = run_inference(input_tensor)
             raw_output = outputs[0] if isinstance(outputs, list) else outputs
-            
-            print(f"[main] Raw output type: {type(raw_output)}")
-            print(f"[main] Raw output shape: {raw_output.shape}")
-            print(f"[main] Raw output dtype: {raw_output.dtype}")
-            
-            detections = decode_leyolo_outputs(raw_output)
-            # Raw debug logging (keep but do not treat as final output)
-            print(f"[main][raw] Detections count: {len(detections)}")
-            if detections:
-                print(f"[main][raw] Sample detection: {detections[0]}")
 
-            # Confidence filtering (Phase 4.0 filter, before mapping)
+            # Pass debug=False to silence per-frame decode logs
+            detections = decode_leyolo_outputs(raw_output, debug=False)
+
             def _conf(d):
                 return float(d.get("score", 1.0)) if isinstance(d, dict) else 1.0
             filtered = [d for d in detections if _conf(d) >= CONF_THRESHOLD]
-            print(f"[main][filtered] Kept after confidence filter: {len(filtered)}")
 
             # Map filtered detections to squares
-            piece_map_candidate = map_pieces_to_squares(filtered, board_size=800)
+            piece_map_candidate = map_pieces_to_squares(filtered, board_size=800, debug=False)
 
-            # Build per-square confidence using detection centers (same mapping as piece_map)
-            confidences_by_square = {}
-            for d in filtered:
-                bbox = d.get("bbox")
-                if not bbox:
-                    continue
-                x1, y1, x2, y2 = bbox
-                cx = (int(x1) + int(x2)) // 2
-                cy = (int(y1) + int(y2)) // 2
-                sq = square_from_point(cx, cy, board_size=800)
-                score = float(d.get("score", 1.0))
-                # keep max confidence per square
-                prev = confidences_by_square.get(sq, 0.0)
-                if score > prev:
-                    confidences_by_square[sq] = score
-
-            # Feed detections to Phase 4.5 (fills temporal buffer and validates)
-            stabilized_fen = fen_extractor.process_detections(piece_map_candidate, confidences_by_square)
-
-            # Warm-up: do not log or use FEN; allow buffers to fill
+            # Warm-up: apply chess prior gating, skip FEN logging
             if i < WARMUP_FRAMES:
-                print(f"[main][warmup] Frame {i}: buffering, skipping FEN output")
+                if ENABLE_CHESS_PRIOR and piece_map_candidate:
+                    for sq in list(piece_map_candidate.keys()):
+                        piece = piece_map_candidate.get(sq)
+                        if not piece:
+                            continue
+                        parts = piece.split("_")
+                        piece_type = parts[-1] if len(parts) >= 2 else ""
+                        rank = int(sq[1]) if len(sq) >= 2 and sq[1].isdigit() else None
+                        if piece_type != "pawn" and (rank in (3, 4, 5, 6) or sq in CENTRAL_SQUARES):
+                            del piece_map_candidate[sq]
+                # Feed to extractor to fill temporal buffer, but don't log
+                fen_extractor.process_detections(piece_map_candidate)
             else:
-                # After warm-up: log only stabilized FEN (no raw piece maps as final output)
-                if stabilized_fen != prev_fen:
-                    print(f"[main][stabilized] FEN: {stabilized_fen}")
-                    prev_fen = stabilized_fen
+                # Post warm-up: collect stabilized FENs via timeline
+                fen = fen_extractor.process_detections(piece_map_candidate)
+                new_fen = fen_timeline.collect(fen)
+                if new_fen:
+                    print(f"[STATE CHANGE] {new_fen}")
 
         except Exception as e:
             print(f"[main] ERROR in Phase 4.5: {e}")
             traceback.print_exc()
-            print("[main] Stopping due to error for inspection.")
             break
         # --- End Phase 4.5 ---
-
-        print(f"Frame {i}: Warped board shape = {board_img.shape}")
-
-        if i == 0:
-            cv2.imwrite("warped_board.png", board_img)  # temp verification
 
         if not args.no_debug:
             if i == 0:
                 if debug_img is not None:
                     cv2.imshow("Board Detection Debug", debug_img)
                     cv2.waitKey(0)
-
                 cv2.imshow("Warped Board", board_img)
                 cv2.waitKey(0)
             else:
@@ -327,10 +370,24 @@ def main(args: argparse.Namespace) -> None:
                 key = cv2.waitKey(500)
                 if key == ord('q'):
                     break
+
     if not args.no_debug:
         cv2.destroyAllWindows()
-    print("Processing complete.")
+    
+    # Phase 5.1: Print FEN timeline summary
+    print(f"Total stable FENs collected: {len(fen_timeline)}")
+    
+    # Phase 5.3: Extract moves inferred during validation
+    entries = fen_timeline.entries()
+    move_list: List[str] = []
+    for fen, meta in entries:
+        if meta and isinstance(meta, dict) and "uci" in meta:
+            move_list.append(meta["uci"])
 
+    print(f"Total moves inferred: {len(move_list)}")
+    # Optionally print moves in order (commented out)
+    # for m in move_list:
+    #     print(m)
 
 if __name__ == "__main__":
     main(parse_args())

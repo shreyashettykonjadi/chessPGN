@@ -4,7 +4,8 @@ from .grid import square_from_point
 
 def map_pieces_to_squares(
     detections: List[Dict[str, Any]],
-    board_size: int = 800
+    board_size: int = 800,
+    debug: bool = False
 ) -> Dict[str, str]:
     """
     Map detection dicts {"label": str, "bbox": (x1,y1,x2,y2)} to algebraic squares.
@@ -38,8 +39,8 @@ def map_pieces_to_squares(
         # map center point to square
         square = square_from_point(cx, cy, board_size=board_size)
 
-        # 🔍 DEBUG (THIS IS THE IMPORTANT LINE)
-        print(f"[DEBUG] label={label}, center=({cx},{cy}), mapped_square={square}")
+        if debug:
+            print(f"[DEBUG] label={label}, center=({cx},{cy}), mapped_square={square}")
 
         prev = square_map.get(square)
         if prev is None or area > prev[1]:

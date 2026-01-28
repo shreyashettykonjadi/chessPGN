@@ -85,7 +85,7 @@ def find_offset(warped_xcorners: np.ndarray) -> Tuple[int, int]:
                 if x not in scores:
                     shift = [0, 0]
                     shift[i] = x
-                    scores[x] = calculate_offset_score(warped_xcorners, tuple(shift))
+                    scores[x] = calculate_offset_score(warped_xcorners, (shift[0], shift[1]))
             
             if scores[mid] > scores[mid + 1]:
                 high = mid
@@ -94,7 +94,7 @@ def find_offset(warped_xcorners: np.ndarray) -> Tuple[int, int]:
         
         best_offset[i] = low + 1
     
-    return tuple(best_offset)
+    return (best_offset[0], best_offset[1])
 
 
 def _build_delaunay_indices(points: np.ndarray, tolerance: float = 5.0) -> List[Tuple[int, int, int]]:
@@ -121,10 +121,11 @@ def _build_delaunay_indices(points: np.ndarray, tolerance: float = 5.0) -> List[
                 break
             idx.append(nearest)
         if len(idx) == 3 and len(set(idx)) == 3:
-            key = tuple(sorted(idx))
+            sorted_idx = sorted(idx)
+            key: Tuple[int, int, int] = (sorted_idx[0], sorted_idx[1], sorted_idx[2])
             if key not in seen:
                 seen.add(key)
-                indices.append(tuple(idx))
+                indices.append((idx[0], idx[1], idx[2]))
     return indices
 
 
