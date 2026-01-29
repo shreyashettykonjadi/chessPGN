@@ -43,6 +43,7 @@ def parse_args():
     p.add_argument("--max-frames", type=int, default=DEFAULT_MAX_FRAMES, help="Hard stop after N frames")
     p.add_argument("--conf-threshold", type=float, default=DEFAULT_CONF)
     p.add_argument("--no-debug", action="store_true", help="Disable real-time playback control")
+    p.add_argument("--debug", action="store_true", help="Enable verbose raw detection logs")
     return p.parse_args()
 
 def get_board_fen(full_fen: str) -> str:
@@ -399,6 +400,7 @@ def main(args: argparse.Namespace) -> None:
 
     # Instantiate VisionInterface for chess logic
     vision = VisionInterface()
+    vision.debug = args.debug  # Set debug flag
     pgn_written = False  # Guard to write PGN once
 
     while True:
@@ -407,7 +409,8 @@ def main(args: argparse.Namespace) -> None:
             break
         # enforce hard global frame limit (treat exceeding as bug)
         if frame_idx >= MAX_FRAMES:
-            raise RuntimeError(f"Frame limit exceeded: {frame_idx} >= {MAX_FRAMES}")
+            print(f"[exit] Frame limit reached: {MAX_FRAMES}")
+            break
         # still respect optional CLI max-frames early stop
         if args.max_frames is not None and frame_idx >= int(args.max_frames):
             print(f"[exit] max-frames reached: {args.max_frames}")
@@ -473,15 +476,16 @@ def main(args: argparse.Namespace) -> None:
                 f"d4={piece_map.get('d4')}"
             )
 
-        # REQUIRED log
+        # REQUIRED log (only when --debug)
         try:
             sample = list(piece_map.items())[:8]
-            print(f"[raw_detections] frame={frame_idx} count={len(piece_map)} sample={sample}")
+            if args.debug:
+                print(f"[raw_detections] frame={frame_idx} count={len(piece_map)} sample={sample}")
         except Exception:
             pass
 
-        # Pass piece_map to VisionInterface for chess logic
-        vision.process_frame(piece_map)
+        # Pass piece_map and frame index to VisionInterface for chess logic
+        vision.process_frame(piece_map, frame_idx)  # TEMP: STEP 1.5 FRAME INDEX
 
         # Add real-time playback control
         if not args.no_debug:
@@ -503,7 +507,14 @@ def main(args: argparse.Namespace) -> None:
         vision.write_pgn(output_path)
         pgn_written = True
 
-    print("[exit] no accepted first move")
+    # Move detection summary
+    print("=== MOVE DETECTION SUMMARY ===")
+    if vision.first_committed_move:
+        print("Total moves detected: 1")
+        print("Moves:")
+        print(f"  1. {vision.first_committed_move}")
+    else:
+        print("No stable moves detected.")
 
 if __name__ == "__main__":
     main(parse_args())

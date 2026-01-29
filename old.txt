@@ -1,106 +1,87 @@
-Goal
+✅ DONE (for context)
 
-Reliably detect ONLY the first real chess move (e.g. e2→e4) from a noisy video stream and write a PGN with exactly one move.
+Step 0: Video → warped board → piece_map
 
-🧱 Core Principles
+Step 1: Label sanitization (reject garbage)
 
-Vision is noisy → never trusted alone
+Step 1.5: Frame index propagation
 
-python-chess is the single authority
+Step 4: Candidate generation + legality check
 
-Time (multiple frames) confirms truth
+Step 5: Temporal confirmation logic
 
-Stop after first accepted move
+You’re now at the “honest but too strict” stage.
 
-📥 Input (per frame)
+🧭 STEPS LEFT (UNTIL FIRST VALID MOVE)
+🟡 STEP 2 — Board Sanity Filter
 
-From vision:
+Goal: Allow imperfect frames that still look like chess.
 
-piece_map = { square → piece }
+Exactly 1 white king + 1 black king
 
+No side has >16 pieces
 
-Example: { "e2": "P", "e7": "p", ... }
+Reject otherwise
 
-No FENs, no snapshots, no history.
+📌 Result:
+Some frames finally pass → deltas start to matter.
 
-🧠 Internal State
+🟡 STEP 3 — Canonicalize Piece Labels (MINIMAL)
 
-previous_piece_map
+Goal: Translate model labels → chess symbols.
 
-current_piece_map
+white_rook → R
 
-candidate_move_counter (per move)
+black_knight → n
 
-chess.Board() (standard start)
+etc.
 
-N = 3 (frames required for confirmation)
+Reject labels that don’t map
 
-🔁 Single Frame Loop
+📌 Result:
+Sanitization stops killing all frames.
 
-For every frame:
+🟡 STEP 4 — First-Move Gate (Single Commit)
 
-Log raw detections
+Goal: Lock the first move once.
 
-Compare with previous frame
+When a move becomes STABLE:
 
-find disappeared squares → from
+push to chess.Board
 
-find appeared squares → to
+store as first_move
 
-Generate candidate moves
+stop accepting new moves
 
-(from_square → to_square)
+📌 Result:
+Exactly one move is committed.
 
-Validate with python-chess
+🟡 STEP 5 — Early Stop After First Move
 
-board.is_legal(move)
+Goal: Don’t process useless frames.
 
-Temporal confirmation
+Stop video loop once first move is locked
 
-same legal move seen in N consecutive frames
+Write PGN with one move only
 
-Accept first stabilized move
+📌 Result:
+Assignment goal satisfied.
 
-board.push(move)
+🎯 END STATE (what you’ll have)
 
-write PGN with exactly one move
+Video runs
 
-stop tracking
+Vision noisy but gated
 
-✅ Acceptance Rule
+e2e4 detected and stabilized
 
-A move is accepted only if:
-
-legal according to python-chess
-
-detected consistently across N frames
-
-This filters:
-
-noisy detections
-
-hallucinated moves (h3, f3, etc.)
-
-📄 Output
-
-PGN file with one move only
+output.pgn contains:
 
 1. e4
 
-🧩 Why This Works
 
-Early noise dies out (not stable)
+No hacks
 
-Real move persists across frames
+No cheating
 
-Chess rules gate everything
-
-Matches idChess / ChessCam philosophy
-
-🚀 What This Enables Later
-
-Extend to move 2, 3, …
-
-Re-enable snapshots or FENs later
-
-Improve vision without changing logic
+Real pipeline
