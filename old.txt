@@ -1,199 +1,106 @@
-Phase 1 — Video Ingestion & Frame Sampling (Brief)
-Read raw chess game videos using OpenCV
+Goal
 
+Reliably detect ONLY the first real chess move (e.g. e2→e4) from a noisy video stream and write a PGN with exactly one move.
 
-Sample frames at fixed intervals to reduce unnecessary processing
+🧱 Core Principles
 
+Vision is noisy → never trusted alone
 
-Convert frames into NumPy arrays for downstream vision tasks
+python-chess is the single authority
 
+Time (multiple frames) confirms truth
 
-Handle invalid video paths and end-of-video safely
+Stop after first accepted move
 
+📥 Input (per frame)
 
-Provide a clean, reusable interface for later phases
+From vision:
 
+piece_map = { square → piece }
 
-Outcome:
- A reliable stream of sampled frames ready for preprocessing and board detection.
 
+Example: { "e2": "P", "e7": "p", ... }
 
-Phase 2 — In Brief
-Took frames from Phase 1 and cropped the top area to isolate the chessboard
+No FENs, no snapshots, no history.
 
+🧠 Internal State
 
-Implemented perspective warping to convert the board into a clean 800×800 top-down square
+previous_piece_map
 
+current_piece_map
 
-Tried automatic corner detection (CameraChessWeb / contour / ML-style)
+candidate_move_counter (per move)
 
+chess.Board() (standard start)
 
-Added a manual corner picker fallback when auto detection fails
+N = 3 (frames required for confirmation)
 
+🔁 Single Frame Loop
 
-Cached selected corners so the user clicks only once per video
+For every frame:
 
+Log raw detections
 
-Applied the same corners to all subsequent frames for stable output
+Compare with previous frame
 
+find disappeared squares → from
 
-Visually verified results using debug overlays + warped board display
+find appeared squares → to
 
+Generate candidate moves
 
- End result: A reliable, ChessCam-style board extraction pipeline
+(from_square → to_square)
 
-python3 main.py --video data/videos/game_1.mp4
+Validate with python-chess
 
+board.is_legal(move)
 
+Temporal confirmation
 
+same legal move seen in N consecutive frames
 
+Accept first stabilized move
 
+board.push(move)
 
+write PGN with exactly one move
 
+stop tracking
 
+✅ Acceptance Rule
 
+A move is accepted only if:
 
+legal according to python-chess
 
+detected consistently across N frames
 
+This filters:
 
+noisy detections
 
+hallucinated moves (h3, f3, etc.)
 
-(3.1) 
+📄 Output
 
+PGN file with one move only
 
-(3.2)
+1. e4
 
+🧩 Why This Works
 
-(3.3)
+Early noise dies out (not stable)
 
-(3.4)
+Real move persists across frames
 
+Chess rules gate everything
 
-(3.5)
+Matches idChess / ChessCam philosophy
 
+🚀 What This Enables Later
 
+Extend to move 2, 3, …
 
-Phase 4.0 — In brief
-We built the complete piece-detection pipeline:
-Took a warped 800×800 chessboard
+Re-enable snapshots or FENs later
 
-
-Preprocessed it to model input (1, 3, 288, 480)
-
-
-Ran LeYOLO ONNX inference with onnxruntime
-
-
-Decoded model outputs into piece labels + bounding boxes
-
-
-Mapped detections to board squares (a1–h8)
-
-
-Generated FEN strings frame-by-frame
-
-
-Result:
- The system now automatically converts a video frame into a valid chess position.
-
-
-
-
-
-
-python main.py --video data/videos/game_1.mp4 --no-debug
-
-
-(4.5)
-
-
-
-
-
-
-Phase 5.1(moves inferred)
-
-
-
-FEN being generated 
-
-
-
-
-
-
-
-Since fps being processed is high the move is being discarded and hence moves inferred=0
-
-1. FEN-first approach
-Generated a full FEN from every frame
-
-
-Validated using chess legality rules
- Result: Failed because moving pieces create temporarily illegal boards that get rejected
-
-
-
-2. Relaxed validation
-Allowed noisy FENs to pass temporarily
- Result: Failed because noise never stabilized into a clean board
-
-
-
-3. FEN delta comparison
-Compared consecutive FENs to infer moves
- Result: Failed due to fallback masking that hid real changes
-
-
-
-4. Fallback removal
-Removed fallback to last valid FEN
- Result: Almost all frames became invalid due to noisy full-board reconstruction
-
-
-
-5. Frame-level delta gating
-Counted square differences per frame
-
-
-Accepted only 2-square deltas
- Result: Failed because per-frame detection is too noisy during motion
-
-
-
-6. Stable snapshot detection
-Buffered frames to detect stable boards
-
-
-Compared stable snapshots for legal moves
- Result: Failed because stable boards were still globally inconsistent
-
-
-
-Core reason these methods failed
-The system tries to reconstruct the entire board every frame. During piece motion, detections overlap, disappear, and reappear, producing illegal intermediate boards. Chess moves cannot be inferred reliably from single frames.
-
-Future plan to get correct PGN output
-Track a persistent chess board state instead of rebuilding it every frame
-
-
-Detect only square-level events (from → to) rather than full boards
-
-
-Require motion completion:
-
-
-Source square empty
-
-
-Destination square stable for multiple frames
-
-
-Confirm moves using chess legality only after motion settles
-
-
-Buffer candidate moves across several frames and select the most consistent one
-
-
-Use full FEN validation only at confirmed move boundaries
-
+Improve vision without changing logic

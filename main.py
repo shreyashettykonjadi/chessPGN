@@ -10,6 +10,10 @@ import hashlib  # Add at top with other imports
 SRC_DIR = Path(__file__).resolve().parent / "src"
 sys.path.insert(0, str(SRC_DIR))
 
+# Ensure repo root is importable so top-level packages like 'detectors' resolve
+PROJECT_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
 # now safe to import everything
 from typing import Optional, Tuple, List
 import argparse
@@ -17,42 +21,33 @@ import cv2  # type: ignore
 import numpy as np
 import chess  # python-chess library
 
+from detectors.piece_detector import preprocess_board, run_inference  # type: ignore
+from piece_decoder import decode_leyolo_outputs  # type: ignore
 from src.fen_builder import build_fen_board
 from src.piece_mapper import map_pieces_to_squares
-from piece_decoder import decode_leyolo_outputs  # type: ignore
-from detectors.piece_detector import preprocess_board, run_inference  # type: ignore
-from src.fen_extractor import FENExtractor
-from src.fen_timeline import FENTimeline
-from src.grid import square_from_point
-from src.pgn_writer import write_pgn
-from src.stable_snapshot_detector import StableSnapshotDetector
-
-# Ensure src is importable
-SRC_DIR = Path(__file__).resolve().parent / "src"
-sys.path.insert(0, str(SRC_DIR))
-
-from video_reader import VideoReader  # type: ignore
+from src.first_move_tracker import FirstMoveTracker
 from preprocess import crop_top_half  # type: ignore
 from corner_picker import pick_corners_interactive  # type: ignore
-from corner_finder import find_board_corners  # type: ignore
+from src.pgn_writer import write_pgn  # use to write final PGN
+from src.vision_interface import VisionInterface
 
-# Insert warm-up and filtering parameters near top-level (just after imports / constants)
-WARMUP_FRAMES = 12           # ignore first N frames for FEN output/logging
-CONF_THRESHOLD = 0.5         # minimum confidence to accept a raw detection
-ENABLE_CHESS_PRIOR = True    # apply light gating during warm-up only
-CENTRAL_SQUARES = {"e4", "d4", "e5", "d5"}
-MAX_FRAMES = 100             # hard early-stop to prevent process from being killed
+BOARD_SIZE = 800
+DEFAULT_MAX_FRAMES = 300
+DEFAULT_CONF = 0.5
+MAX_FRAMES = 300
 
-# Temporary debug toggle for move inference diagnostics
-debug_move_inference = True
-debug_fen_timeline = True  # Enable FEN transition validation debug
-debug_pipeline_trace = True  # Trace raw model output variation
-
+def parse_args():
+    p = argparse.ArgumentParser(description="First-move-only chess detection")
+    p.add_argument("--video", "-v", required=True)
+    p.add_argument("--output", "-o", default=None)
+    p.add_argument("--max-frames", type=int, default=DEFAULT_MAX_FRAMES, help="Hard stop after N frames")
+    p.add_argument("--conf-threshold", type=float, default=DEFAULT_CONF)
+    p.add_argument("--no-debug", action="store_true", help="Disable real-time playback control")
+    return p.parse_args()
 
 def get_board_fen(full_fen: str) -> str:
     """Extract only the board portion from a full FEN string."""
     return full_fen.split()[0]
-
 
 def count_square_differences(board_fen1: str, board_fen2: str) -> int:
     """
@@ -79,7 +74,6 @@ def count_square_differences(board_fen1: str, board_fen2: str) -> int:
     
     return sum(1 for a, b in zip(squares1, squares2) if a != b)
 
-
 def get_piece_at_square(board_fen: str, square: str) -> str:
     """
     Get the piece at a given square from a board FEN string.
@@ -104,7 +98,6 @@ def get_piece_at_square(board_fen: str, square: str) -> str:
     rank_idx = 8 - int(square[1])  # 0-7 (rank 8 = index 0)
     idx = rank_idx * 8 + file_idx
     return squares[idx] if 0 <= idx < 64 else '?'
-
 
 def get_king_squares(board_fen: str) -> Tuple[Optional[str], Optional[str]]:
     """
@@ -136,7 +129,6 @@ def get_king_squares(board_fen: str) -> Tuple[Optional[str], Optional[str]]:
             black_king = sq
     
     return white_king, black_king
-
 
 def infer_moves_from_fens(fen_history: List[str], debug: bool = False) -> List[str]:
     """
@@ -236,7 +228,6 @@ def infer_moves_from_fens(fen_history: List[str], debug: bool = False) -> List[s
 
     return move_list
 
-
 def order_corners_tl_tr_br_bl(pts: np.ndarray) -> np.ndarray:
     # Robustly order corners: top-left, top-right, bottom-right, bottom-left
     # Sort by y (top two first), then by x within each row.
@@ -252,7 +243,6 @@ def order_corners_tl_tr_br_bl(pts: np.ndarray) -> np.ndarray:
     bl, br = bottom_sorted[0], bottom_sorted[1]
     return np.array([tl, tr, br, bl], dtype=np.float32)
 
-
 def is_square_light(board_img: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> bool:
     """Check if the square region is light (True) or dark (False) based on mean intensity."""
     cx = (x1 + x2) // 2
@@ -266,7 +256,6 @@ def is_square_light(board_img: np.ndarray, x1: int, y1: int, x2: int, y2: int) -
         region = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
     mean_intensity = np.mean(region)
     return bool(mean_intensity > 127)
-
 
 def check_board_orientation(board_img: np.ndarray) -> bool:
     """
@@ -302,7 +291,6 @@ def check_board_orientation(board_img: np.ndarray) -> bool:
     contrast = (np.mean([vals[k] for k in brightest]) - np.mean([vals[k] for k in darkest]))
     return ok
 
-
 def normalize_board_orientation(board_img: np.ndarray) -> np.ndarray:
     """
     Rotate by 0/90/180/270 to achieve typical orientation (a1 dark, a8 light, h1 light, h8 dark).
@@ -321,7 +309,6 @@ def normalize_board_orientation(board_img: np.ndarray) -> np.ndarray:
             continue
     # Fallback: keep original if no confident orientation found
     return board_img
-
 
 def warp_board(frame: np.ndarray, corners: np.ndarray, output_size: Tuple[int, int] = (800, 800)) -> Optional[np.ndarray]:
     """Warp frame using provided corners to a square output. Returns None on failure."""
@@ -368,6 +355,12 @@ def warp_board(frame: np.ndarray, corners: np.ndarray, output_size: Tuple[int, i
         return None
     
 
+def warp_board_simple(frame, corners, size=(BOARD_SIZE, BOARD_SIZE)):
+    src = order_corners_tl_tr_br_bl(corners.astype(np.float32))
+    dst = np.array([[0,0],[size[0]-1,0],[size[0]-1,size[1]-1],[0,size[1]-1]], dtype=np.float32)
+    M = cv2.getPerspectiveTransform(src, dst)
+    return cv2.warpPerspective(frame, M, size)
+
 def get_board_corners(
     frame: np.ndarray, 
     cached_corners: Optional[np.ndarray] = None
@@ -390,147 +383,127 @@ def get_board_corners(
     return manual_corners, None
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Chess PGN from video: Extract and warp chessboard from video frames."
-    )
-    parser.add_argument("--video", "-v", required=True, help="Path to input video file")
-    parser.add_argument("--interval", type=int, default=30, help="Sample every N frames (default: 30)")
-    parser.add_argument("--max-frames", type=int, default=10, help="Maximum frames to process (default: 10)")
-    parser.add_argument("--no-debug", action="store_true", help="Skip debug windows and visualization")
-    parser.add_argument("--output", "-o", type=str, default=None, help="Output PGN file path (default: <video_name>.pgn)")
-    # removed --rotate temporary flag
-    return parser.parse_args()
-
-
 def main(args: argparse.Namespace) -> None:
-    # Initialize video reader
-    reader = VideoReader(
-        path=args.video,
-        sample_interval_frames=3,
-        max_frames=None
-    )
+    board = chess.Board()  # canonical authoritative board
+    tracker = FirstMoveTracker(stability_frames=8, min_empty_frames=5, debug=False)
 
-    frames = reader.read()
+    cap = cv2.VideoCapture(str(Path(args.video)))
+    if not cap.isOpened():
+        print(f"[error] cannot open video: {args.video}")
+        return
 
-    cached_corners: Optional[np.ndarray] = None
-    
-    # NEW: Stable snapshot detector (replaces FENExtractor/FENTimeline approach)
-    # Reduced threshold to 3 for more responsive detection in noisy video
-    stable_detector = StableSnapshotDetector(stability_threshold=3, debug=True)
+    corners = None
+    frame_idx = 0
+    max_frames = int(args.max_frames)
+    conf_thresh = float(args.conf_threshold)
 
-    for i, frame in enumerate(frames):
-        # Hard early-stop to prevent process from being killed
-        if i >= MAX_FRAMES:
-            print(f"[main] Early stop: frame limit ({MAX_FRAMES}) reached")
+    # Instantiate VisionInterface for chess logic
+    vision = VisionInterface()
+    pgn_written = False  # Guard to write PGN once
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        # enforce hard global frame limit (treat exceeding as bug)
+        if frame_idx >= MAX_FRAMES:
+            raise RuntimeError(f"Frame limit exceeded: {frame_idx} >= {MAX_FRAMES}")
+        # still respect optional CLI max-frames early stop
+        if args.max_frames is not None and frame_idx >= int(args.max_frames):
+            print(f"[exit] max-frames reached: {args.max_frames}")
             break
 
-        cropped_frame = crop_top_half(frame)
-
-        corners, debug_img = get_board_corners(cropped_frame, cached_corners)
-
+        cropped = crop_top_half(frame)
         if corners is None:
-            break
+            print("[input] select 4 corners (TL,TR,BR,BL)")
+            corners = pick_corners_interactive(cropped)
+            if corners is None:
+                print("[error] corners not selected")
+                return
 
-        if cached_corners is None:
-            cached_corners = corners
+        board_img = warp_board_simple(cropped, corners)
 
-        board_img = warp_board(cropped_frame, corners)
+        # orient attempt: rotate clockwise so a1 bottom-left
+        board_img = cv2.rotate(board_img, cv2.ROTATE_90_CLOCKWISE)
 
-        if board_img is None:
+        # hand detection removed — assume no hand present for first-move-only run
+        hand_present = False
+
+        # inference
+        try:
+            tensor = preprocess_board(board_img)
+            outputs = run_inference(tensor)
+        except Exception:
+            frame_idx += 1
             continue
 
-        # Rotate 90° counter-clockwise to match standard chess orientation
-        board_img = cv2.rotate(board_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
-
-        # --- Phase 4.5: Detect pieces, map to squares, and build FEN ---
-        try:
-            input_tensor = preprocess_board(board_img)
-            outputs = run_inference(input_tensor)
-            raw_output = outputs[0] if isinstance(outputs, list) else outputs
-
-            # DIAGNOSTIC: hash raw ONNX output (disabled for cleaner output)
-            # try:
-            #     raw_arr = raw_output if isinstance(raw_output, np.ndarray) else np.array(raw_output)
-            #     raw_hash = hashlib.md5(raw_arr.tobytes()).hexdigest()[:8]
-            # except Exception:
-            #     raw_hash = "err"
-            # print(f"[trace] frame={i} raw_output_hash={raw_hash}")
-
-            detections = decode_leyolo_outputs(raw_output)
-
-            def _conf(d):
-                return float(d.get("score", 1.0)) if isinstance(d, dict) else 1.0
-            filtered = [d for d in detections if _conf(d) >= CONF_THRESHOLD]
-
-            # Map filtered detections to squares
-            piece_map_candidate = map_pieces_to_squares(filtered, board_size=800, debug=False)
-
-            # --- NEW: Stable snapshot detection approach ---
-            # Process all frames (warm-up just skips logging, but we need frames for stability)
-            detected_move = stable_detector.process_frame(i, piece_map_candidate)
-            if detected_move:
-                print(f"[main] ✓ Move detected at frame {i}: {detected_move}")
-
-        except Exception as e:
-            print(f"[main] ERROR in Phase 4.5: {e}")
-            traceback.print_exc()
-            break
-        # --- End Phase 4.5 ---
-
-        if not args.no_debug:
-            if i == 0:
-                if debug_img is not None:
-                    cv2.imshow("Board Detection Debug", debug_img)
-                    cv2.waitKey(0)
-                cv2.imshow("Warped Board", board_img)
-                cv2.waitKey(0)
-            else:
-                cv2.imshow("Warped Board", board_img)
-                key = cv2.waitKey(500)
-                if key == ord('q'):
-                    break
-
-    if not args.no_debug:
-        cv2.destroyAllWindows()
-    
-    # NEW: Get moves from stable snapshot detector
-    move_list = stable_detector.get_detected_moves()
-    
-    print(f"\n=== STABLE SNAPSHOT DETECTION RESULTS ===")
-    print(f"Total moves detected: {len(move_list)}")
-    
-    # Print moves for debugging
-    if move_list:
-        print("Moves detected:")
-        for i, m in enumerate(move_list, 1):
-            print(f"  {i}. {m}")
-    
-    # Write PGN file if moves were detected
-    if move_list:
-        # Determine output path
-        if args.output:
-            output_path = args.output
+        # robustly select output and decode
+        raw_output = None
+        if isinstance(outputs, (list,tuple)) and len(outputs)>0:
+            raw_output = outputs[0]
+        elif isinstance(outputs, dict):
+            raw_output = next(iter(outputs.values()), None)
         else:
-            video_path = Path(args.video)
-            output_path = video_path.with_suffix('.pgn')
-        
-        # Extract video name for PGN headers
-        video_name = Path(args.video).stem
-        
-        # Write PGN using detected moves
-        write_pgn(
-            move_list,
-            str(output_path),
-            event=f"Chess Game",
-            site=video_name,
-            white="White",
-            black="Black",
-            result="*"
-        )
-        print(f"\nPGN file written to: {output_path}")
-    else:
-        print("\nNo moves detected. PGN file not generated.")
+            raw_output = outputs
+
+        if raw_output is None:
+            frame_idx += 1
+            continue
+
+        try:
+            detections = decode_leyolo_outputs(raw_output)
+        except Exception:
+            frame_idx += 1
+            continue
+
+        filtered = [d for d in detections if float(d.get("score",0.0)) >= conf_thresh]
+        try:
+            piece_map = map_pieces_to_squares(filtered, board_size=BOARD_SIZE, debug=False)
+        except Exception:
+            frame_idx += 1
+            continue
+
+        # Diagnostic: check e2/e4 and d2/d4 presence every 10 frames (minimal log)
+        if frame_idx % 10 == 0:
+            print(
+                f"[frame {frame_idx}] "
+                f"e2={piece_map.get('e2')}, "
+                f"e4={piece_map.get('e4')}, "
+                f"d2={piece_map.get('d2')}, "
+                f"d4={piece_map.get('d4')}"
+            )
+
+        # REQUIRED log
+        try:
+            sample = list(piece_map.items())[:8]
+            print(f"[raw_detections] frame={frame_idx} count={len(piece_map)} sample={sample}")
+        except Exception:
+            pass
+
+        # Pass piece_map to VisionInterface for chess logic
+        vision.process_frame(piece_map)
+
+        # Add real-time playback control
+        if not args.no_debug:
+            cv2.imshow("Live Board", board_img)
+            key = cv2.waitKey(30)  # ~30 FPS
+            if key == ord('q'):
+                print("[exit] user quit")
+                break
+
+        frame_idx += 1
+
+    cap.release()
+    # Properly close OpenCV windows
+    cv2.destroyAllWindows()
+
+    # Write PGN once if a move was committed
+    if vision.first_committed_move and not pgn_written:
+        output_path = args.output or str(Path(args.video).with_suffix(".pgn"))
+        vision.write_pgn(output_path)
+        pgn_written = True
+
+    print("[exit] no accepted first move")
 
 if __name__ == "__main__":
     main(parse_args())
