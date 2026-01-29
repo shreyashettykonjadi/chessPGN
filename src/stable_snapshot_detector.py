@@ -151,6 +151,37 @@ class StableSnapshotDetector:
         # Compare with last stable snapshot
         if self._last_stable is None:
             # First stable snapshot - initialize
+            # Diagnostic: compare detected map vs canonical start (visibility only; no filtering)
+            try:
+                PIECE_TO_FEN = {
+                    "white_pawn": "P", "white_rook": "R", "white_knight": "N",
+                    "white_bishop": "B", "white_queen": "Q", "white_king": "K",
+                    "black_pawn": "p", "black_rook": "r", "black_knight": "n",
+                    "black_bishop": "b", "black_queen": "q", "black_king": "k",
+                }
+                canonical = chess.Board()
+                conflicts = 0
+                for sq_idx in range(64):
+                    sq = chess.square_name(sq_idx)
+                    expected_piece = canonical.piece_at(sq_idx)
+                    expected_label = None
+                    if expected_piece:
+                        sym = expected_piece.symbol()
+                        # convert symbol to our label space
+                        label_map = {
+                            'P': 'white_pawn', 'N': 'white_knight', 'B': 'white_bishop',
+                            'R': 'white_rook', 'Q': 'white_queen', 'K': 'white_king',
+                            'p': 'black_pawn', 'n': 'black_knight', 'b': 'black_bishop',
+                            'r': 'black_rook', 'q': 'black_queen', 'k': 'black_king',
+                        }
+                        expected_label = label_map.get(sym)
+                    observed_label = stable_map.get(sq)
+                    if observed_label and expected_label and observed_label != expected_label:
+                        conflicts += 1
+                if self.debug:
+                    print(f"[snapshot-init] frame={stable_frame} raw_detections_count={len(stable_map)} conflicts_vs_start={conflicts}")
+            except Exception:
+                pass
             self._last_stable = (stable_frame, stable_map, stable_hash)
             if self.debug:
                 print(f"[stable-snapshot] Initial board detected (frame {stable_frame}, {len(stable_map)} pieces)")
