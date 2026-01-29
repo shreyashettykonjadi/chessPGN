@@ -24,6 +24,8 @@ from detectors.piece_detector import preprocess_board, run_inference  # type: ig
 from src.fen_extractor import FENExtractor
 from src.fen_timeline import FENTimeline
 from src.grid import square_from_point
+from src.pgn_writer import write_pgn
+from src.stable_snapshot_detector import StableSnapshotDetector
 
 # Ensure src is importable
 SRC_DIR = Path(__file__).resolve().parent / "src"
@@ -39,7 +41,7 @@ WARMUP_FRAMES = 12           # ignore first N frames for FEN output/logging
 CONF_THRESHOLD = 0.5         # minimum confidence to accept a raw detection
 ENABLE_CHESS_PRIOR = True    # apply light gating during warm-up only
 CENTRAL_SQUARES = {"e4", "d4", "e5", "d5"}
-MAX_FRAMES = 180             # hard early-stop to prevent process from being killed
+MAX_FRAMES = 100             # hard early-stop to prevent process from being killed
 
 # Temporary debug toggle for move inference diagnostics
 debug_move_inference = True
@@ -373,8 +375,7 @@ def get_board_corners(
     """
     Get board corners using:
     1. Cached corners (if provided)
-    2. Automatic detection (CameraChessWeb-inspired)
-    3. Manual selection (fallback)
+    2. Manual selection (automatic detection skipped for speed)
 
     Returns (corners, debug_img)
     """
@@ -382,16 +383,9 @@ def get_board_corners(
     if cached_corners is not None:
         return cached_corners, None
 
-    # Try automatic detection
-    corners, debug_img = find_board_corners(frame, debug=True)
-
-    if corners is not None:
-        # print("Automatic board detection successful.")
-        return corners, debug_img
-
-    # Do not show UI here; main() controls all visualization
-    # print("Automatic board detection failed. Please select board corners manually.")
-    # print("Click corners in order: Top-Left -> Top-Right -> Bottom-Right -> Bottom-Left")
+    # Skip automatic detection - go straight to manual selection
+    print("Please select board corners manually.")
+    print("Click corners in this order: 1) Top-Left, 2) Top-Right, 3) Bottom-Right, 4) Bottom-Left")
     manual_corners = pick_corners_interactive(frame)
     return manual_corners, None
 
@@ -404,6 +398,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interval", type=int, default=30, help="Sample every N frames (default: 30)")
     parser.add_argument("--max-frames", type=int, default=10, help="Maximum frames to process (default: 10)")
     parser.add_argument("--no-debug", action="store_true", help="Skip debug windows and visualization")
+    parser.add_argument("--output", "-o", type=str, default=None, help="Output PGN file path (default: <video_name>.pgn)")
     # removed --rotate temporary flag
     return parser.parse_args()
 
@@ -419,8 +414,10 @@ def main(args: argparse.Namespace) -> None:
     frames = reader.read()
 
     cached_corners: Optional[np.ndarray] = None
-    fen_timeline = FENTimeline(validate_transitions=True, debug=debug_fen_timeline)
-    fen_extractor = FENExtractor(window_size=3, strict_validation=True)
+    
+    # NEW: Stable snapshot detector (replaces FENExtractor/FENTimeline approach)
+    # Reduced threshold to 3 for more responsive detection in noisy video
+    stable_detector = StableSnapshotDetector(stability_threshold=3, debug=True)
 
     for i, frame in enumerate(frames):
         # Hard early-stop to prevent process from being killed
@@ -452,13 +449,13 @@ def main(args: argparse.Namespace) -> None:
             outputs = run_inference(input_tensor)
             raw_output = outputs[0] if isinstance(outputs, list) else outputs
 
-            # DIAGNOSTIC: hash raw ONNX output to verify per-frame variation
-            try:
-                raw_arr = raw_output if isinstance(raw_output, np.ndarray) else np.array(raw_output)
-                raw_hash = hashlib.md5(raw_arr.tobytes()).hexdigest()[:8]
-            except Exception:
-                raw_hash = "err"
-            print(f"[trace] frame={i} raw_output_hash={raw_hash}")
+            # DIAGNOSTIC: hash raw ONNX output (disabled for cleaner output)
+            # try:
+            #     raw_arr = raw_output if isinstance(raw_output, np.ndarray) else np.array(raw_output)
+            #     raw_hash = hashlib.md5(raw_arr.tobytes()).hexdigest()[:8]
+            # except Exception:
+            #     raw_hash = "err"
+            # print(f"[trace] frame={i} raw_output_hash={raw_hash}")
 
             detections = decode_leyolo_outputs(raw_output)
 
@@ -469,39 +466,11 @@ def main(args: argparse.Namespace) -> None:
             # Map filtered detections to squares
             piece_map_candidate = map_pieces_to_squares(filtered, board_size=800, debug=False)
 
-            # --- DIAGNOSTIC: trace where variation disappears ---
-            if debug_pipeline_trace and i >= WARMUP_FRAMES:
-                # Hash of raw detections (before smoother)
-                det_str = str(sorted(piece_map_candidate.items()))
-                det_hash = hashlib.md5(det_str.encode()).hexdigest()[:8]
-                print(f"[trace] frame={i} raw_pieces={len(piece_map_candidate)} hash={det_hash}")
-
-            # Warm-up: apply chess prior gating, skip FEN logging
-            if i < WARMUP_FRAMES:
-                if ENABLE_CHESS_PRIOR and piece_map_candidate:
-                    for sq in list(piece_map_candidate.keys()):
-                        piece = piece_map_candidate.get(sq)
-                        if not piece:
-                            continue
-                        parts = piece.split("_")
-                        piece_type = parts[-1] if len(parts) >= 2 else ""
-                        rank = int(sq[1]) if len(sq) >= 2 and sq[1].isdigit() else None
-                        if piece_type != "pawn" and (rank in (3, 4, 5, 6) or sq in CENTRAL_SQUARES):
-                            del piece_map_candidate[sq]
-                # Feed to extractor to fill temporal buffer, but don't log
-                fen_extractor.process_detections(piece_map_candidate)
-            else:
-                # Post warm-up: collect stabilized FENs via timeline using metadata-aware call
-                extraction = fen_extractor.process_detections_with_metadata(piece_map_candidate)
-                if not extraction.get("is_valid", False):
-                    # Do not pass fallback FENs to the timeline; wait until a truly valid board appears
-                    print("[Trace] Invalid board detected, previously masked as fallback")
-                else:
-                    raw_fen = extraction.get("fen")
-                    fen = str(raw_fen) if isinstance(raw_fen, str) else None
-                    new_fen = fen_timeline.collect(fen)
-                    if new_fen:
-                        print(f"[STATE CHANGE] {new_fen}")
+            # --- NEW: Stable snapshot detection approach ---
+            # Process all frames (warm-up just skips logging, but we need frames for stability)
+            detected_move = stable_detector.process_frame(i, piece_map_candidate)
+            if detected_move:
+                print(f"[main] ✓ Move detected at frame {i}: {detected_move}")
 
         except Exception as e:
             print(f"[main] ERROR in Phase 4.5: {e}")
@@ -525,20 +494,43 @@ def main(args: argparse.Namespace) -> None:
     if not args.no_debug:
         cv2.destroyAllWindows()
     
-    # Phase 5.1: Print FEN timeline summary
-    print(f"Total stable FENs collected: {len(fen_timeline)}")
+    # NEW: Get moves from stable snapshot detector
+    move_list = stable_detector.get_detected_moves()
     
-    # Phase 5.3: Extract moves inferred during validation
-    entries = fen_timeline.entries()
-    move_list: List[str] = []
-    for fen, meta in entries:
-        if meta and isinstance(meta, dict) and "uci" in meta:
-            move_list.append(meta["uci"])
-
-    print(f"Total moves inferred: {len(move_list)}")
-    # Optionally print moves in order (commented out)
-    # for m in move_list:
-    #     print(m)
+    print(f"\n=== STABLE SNAPSHOT DETECTION RESULTS ===")
+    print(f"Total moves detected: {len(move_list)}")
+    
+    # Print moves for debugging
+    if move_list:
+        print("Moves detected:")
+        for i, m in enumerate(move_list, 1):
+            print(f"  {i}. {m}")
+    
+    # Write PGN file if moves were detected
+    if move_list:
+        # Determine output path
+        if args.output:
+            output_path = args.output
+        else:
+            video_path = Path(args.video)
+            output_path = video_path.with_suffix('.pgn')
+        
+        # Extract video name for PGN headers
+        video_name = Path(args.video).stem
+        
+        # Write PGN using detected moves
+        write_pgn(
+            move_list,
+            str(output_path),
+            event=f"Chess Game",
+            site=video_name,
+            white="White",
+            black="Black",
+            result="*"
+        )
+        print(f"\nPGN file written to: {output_path}")
+    else:
+        print("\nNo moves detected. PGN file not generated.")
 
 if __name__ == "__main__":
     main(parse_args())

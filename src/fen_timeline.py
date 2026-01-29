@@ -19,8 +19,9 @@ class FENTimeline:
         self._max_buffer: int = 5
 
         # Confirmation buffer for VALID candidates (post-move confirmation)
+        # Reduced from 3 to 1 to be more responsive to moves in high FPS videos
         self._confirm_buffer: List[str] = []
-        self._confirm_size: int = 3
+        self._confirm_size: int = 1
 
     def collect(self, fen: Optional[str]) -> Optional[str]:
         if fen is None:

@@ -63,11 +63,15 @@ def pick_corners_interactive(img: np.ndarray, window_name: str = "Select Board C
         nonlocal validation_msg
         disp = img.copy()
         
-        # Draw instruction text
+        # Draw instruction text with order
         next_idx = len(points)
         if next_idx < 4:
-            instruction = f"Click corner {next_idx + 1}/4"
+            corner_order = ["Top-Left", "Top-Right", "Bottom-Right", "Bottom-Left"]
+            instruction = f"Click corner {next_idx + 1}/4: {corner_order[next_idx]}"
             cv2.putText(disp, instruction, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            # Show full order reminder
+            order_text = "Order: 1) Top-Left  2) Top-Right  3) Bottom-Right  4) Bottom-Left"
+            cv2.putText(disp, order_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         else:
             cv2.putText(disp, "Validating selection...", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
         

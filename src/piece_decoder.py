@@ -52,7 +52,7 @@ def decode_leyolo_outputs(
     confidences_all = max_class_probs_all
     keep_mask = confidences_all >= conf_threshold
     num_kept = int(np.sum(keep_mask))
-    print(f"[decode] Anchors above threshold ({conf_threshold}): {num_kept} / {len(keep_mask)}")
+    # print(f"[decode] Anchors above threshold ({conf_threshold}): {num_kept} / {len(keep_mask)}")  # Disabled for cleaner output
     
     detections: List[Dict[str, Any]] = []
     if num_kept == 0:
@@ -68,7 +68,7 @@ def decode_leyolo_outputs(
         selected = kept_indices[order]
 
     # Single concise log per frame (after applying top_k)
-    print(f"[decode] anchors above threshold: {num_kept}, after top_k: {len(selected)}")
+    # print(f"[decode] anchors above threshold: {num_kept}, after top_k: {len(selected)}")  # Disabled for cleaner output
 
     # Slice arrays by selected indices
     boxes_raw = boxes_raw_all[selected]

@@ -1,270 +1,199 @@
+Phase 1 — Video Ingestion & Frame Sampling (Brief)
+Read raw chess game videos using OpenCV
 
 
-Solution — steps
+Sample frames at fixed intervals to reduce unnecessary processing
 
-Extend the transition validator to perform move-based validation (unique legal move explains transition) and return move metadata.
-Make FENTimeline store entries as (fen, move_meta) internally; keep history() returning list[str] (backwards-compatible) and add entries() to return full tuples.
-Update main.py to gather move_list from timeline entries instead of a separate post-pass.
-Files changed:
 
-fen_transition_validator.py
-fen_timeline.py
-src/main.py
-fen_transition_validator.py
-Add move-based validation and return move metadata when a transition is accepted.
+Convert frames into NumPy arrays for downstream vision tasks
 
-Edited
-fen_transition_validator.py+0-0
-fen_timeline.py
-Store entries as (fen, move_meta). history() remains list[str] for backwards compatibility. Add entries() to access full tuples.
 
-Edited
-fen_timeline.py+0-0
-main.py
-Use timeline entries to produce move_list; remove the separate infer pass. Minimal changes in main only at the end where moves were inferred.
+Handle invalid video paths and end-of-video safely
 
-Edited
-main.py+10-2
 
-Solution — steps
+Provide a clean, reusable interface for later phases
 
-Extend the transition validator to perform move-based validation (unique legal move explains transition) and return move metadata.
-Make FENTimeline store entries as (fen, move_meta) internally; keep history() returning list[str] (backwards-compatible) and add entries() to return full tuples.
-Update main.py to gather move_list from timeline entries instead of a separate post-pass.
-Files changed:
 
-fen_transition_validator.py
-fen_timeline.py
-src/main.py
-fen_transition_validator.py
-Add move-based validation and return move metadata when a transition is accepted.
+Outcome:
+ A reliable stream of sampled frames ready for preprocessing and board detection.
 
-Edited
-fen_transition_validator.py+0-0
-fen_timeline.py
-Store entries as (fen, move_meta). history() remains list[str] for backwards compatibility. Add entries() to access full tuples.
 
-Edited
-fen_timeline.py+0-0
-main.py
-Use timeline entries to produce move_list; remove the separate infer pass. Minimal changes in main only at the end where moves were inferred.
+Phase 2 — In Brief
+Took frames from Phase 1 and cropped the top area to isolate the chessboard
 
-Edited
-main.py+10-2
 
-Now I can see the issue. In main.py, the VideoReader is initialized with sample_interval_frames=15, which skips too many frames between samples. I'll reduce this to process more frames and catch valid transitions.
+Implemented perspective warping to convert the board into a clean 800×800 top-down square
 
-main.py
-Reduce frame sampling interval from 15 to 3 to capture more board states.
 
-Edited
-main.py+0-0
-Also, let's reduce the warmup frames slightly since we're processing more frames now:
+Tried automatic corner detection (CameraChessWeb / contour / ML-style)
 
-Edited
-main.py+0-0
-Additionally, let's silence the noisy decode logs since they're not needed for debugging move inference:
 
-piece_decoder.py
-Guard decode logs with a debug flag to reduce output noise.
+Added a manual corner picker fallback when auto detection fails
 
-Edited
-piece_decoder.py+8-4
 
-Looking at the files provided, I can see that:
+Cached selected corners so the user clicks only once per video
 
-piece_decoder.py - Already has the debug=False parameter added, so decode logs are guarded ✓
-piece_mapper.py - Already has the debug=False parameter added, so mapper logs are guarded ✓
-Both files already have the debug flag implemented. The issue is that decode_leyolo_outputs in main.py is being called without debug=False explicitly passed.
 
-main.py
-Pass debug=False to decode_leyolo_outputs to silence decode logs.
+Applied the same corners to all subsequent frames for stable output
 
-Edited
-main.py+2-1
-Also, I notice that the test file test_decoder_shape.py expects 11 labels but LABELS in piece_decoder.py has 12 entries. Let me fix that test:
 
-test_decoder_shape.py
-Fix expected label count from 11 to 12.
+Visually verified results using debug overlays + warped board display
 
-Edited
-test_decoder_shape.py+2-2
 
+ End result: A reliable, ChessCam-style board extraction pipeline
 
-Solution — steps
+python3 main.py --video data/videos/game_1.mp4
 
-Decrease video sampling interval so frames are processed more frequently.
-Reduce warm-up frame count to account for denser sampling.
-Change only two small locations in main.py.
-File changes
 
-main.py
-Change warm-up constant and VideoReader sampling argument.
 
-Edited
-main.py+1-1
-Hints
 
-The WARMUP_FRAMES line is near the top-level constants section (search for "WARMUP_FRAMES").
-The VideoReader construction is inside main(), near the start of the function (search for "VideoReader(").
-These two edits are sufficient; no other files need modification for this step.
 
 
 
-LAST THING 
-for the prompt 
-Context
-We have completed Phase 5.2: strict FEN transition validation.
-The current system correctly rejects noisy FENs using a square-change threshold but produces very few stable FENs and zero inferred moves.
 
-Goal of Phase 5.3
-Upgrade the validator so that a FEN transition is accepted if and only if it can be explained by exactly one legal chess move, using python-chess.
-Move inference must happen during validation, not as a post-processing step.
 
-What to implement
 
-Extend the transition validator
 
-Given (prev_fen, curr_fen):
 
-Load prev_fen into a chess.Board
 
-Iterate all legal moves
 
-Apply each move
 
-Compare resulting board position with curr_fen (board portion only)
+(3.1) 
 
-If:
 
-Exactly one legal move matches → ACCEPT transition
+(3.2)
 
-Zero or >1 matches → REJECT transition
 
-Relax square-difference heuristic
+(3.3)
 
-Keep the existing square-change check
+(3.4)
 
-Increase tolerance (e.g. <= 8)
 
-Only allow larger changes if a unique legal move explains them
+(3.5)
 
-Attach move metadata
 
-When a transition is accepted:
 
-Store:
+Phase 4.0 — In brief
+We built the complete piece-detection pipeline:
+Took a warped 800×800 chessboard
 
-uci_move
 
-san_move
+Preprocessed it to model input (1, 3, 288, 480)
 
-move_index
 
-The FEN timeline should now be:
+Ran LeYOLO ONNX inference with onnxruntime
 
-[(fen_0),
- (fen_1, move_0),
- (fen_2, move_1),
- ...]
 
+Decoded model outputs into piece labels + bounding boxes
 
-Update FENTimeline
 
-Validation + move inference must happen inside collect()
+Mapped detections to board squares (a1–h8)
 
-No separate “infer_moves_from_fens” pass
 
-Logging (debug mode)
+Generated FEN strings frame-by-frame
 
-Log:
 
-Number of legal moves tested
+Result:
+ The system now automatically converts a video frame into a valid chess position.
 
-Matching moves found
 
-Accepted move (SAN + UCI)
 
-Reason for rejection when rejected
 
-Do NOT do
 
-❌ Do not guess moves
 
-❌ Do not accept transitions without a legal move explanation
+python main.py --video data/videos/game_1.mp4 --no-debug
 
-❌ Do not remove Phase 5.2 logic
 
-❌ Do not weaken validator without chess justification
+(4.5)
 
-Before coding — REQUIRED
 
-Please ask me for any required files before making assumptions, especially:
 
-fen_timeline.py
 
-fen_transition_validator.py
 
-main.py
 
-Any existing move inference or chess logic
+Phase 5.1(moves inferred)
 
-Test files related to Phase 5.x
 
-I will paste the files you request.
-(Files content from chessCam that i have — do not assume contents)
 
-public/
-src/
-  components/
-  slices/
-    cornersSlice.tsx
-    gameSlice.tsx
-    index.tsx
-    userSlice.tsx
-  style/
-  utils/
-  render/
-  constants.tsx
-  detect.tsx
-  findCorners.tsx
-  findFen.tsx
-  findPieces.tsx
-  lichess.tsx
+FEN being generated 
 
-Success criteria for Phase 5.3
 
-Stable FEN count increases meaningfully
 
-Each accepted transition has exactly one legal move
 
-Total moves inferred > 0
 
-No illegal chess transitions pass through
 
-(what copilot replied with )
-Solution — steps
 
-Extend the transition validator to perform move-based validation (unique legal move explains transition) and return move metadata.
-Make FENTimeline store entries as (fen, move_meta) internally; keep history() returning list[str] (backwards-compatible) and add entries() to return full tuples.
-Update main.py to gather move_list from timeline entries instead of a separate post-pass.
-Files changed:
+Since fps being processed is high the move is being discarded and hence moves inferred=0
 
-fen_transition_validator.py
-fen_timeline.py
-src/main.py
-fen_transition_validator.py
-Add move-based validation and return move metadata when a transition is accepted.
+1. FEN-first approach
+Generated a full FEN from every frame
 
-Edited
-fen_transition_validator.py
-fen_timeline.py
-Store entries as (fen, move_meta). history() remains list[str] for backwards compatibility. Add entries() to access full tuples.
 
-Edited
-fen_timeline.py
-main.py
-Use timeline entries to produce move_list; remove the separate infer pass. Minimal changes in main only at the end where moves were inferred.
+Validated using chess legality rules
+ Result: Failed because moving pieces create temporarily illegal boards that get rejected
 
-Edited
-main.py+10-2
+
+
+2. Relaxed validation
+Allowed noisy FENs to pass temporarily
+ Result: Failed because noise never stabilized into a clean board
+
+
+
+3. FEN delta comparison
+Compared consecutive FENs to infer moves
+ Result: Failed due to fallback masking that hid real changes
+
+
+
+4. Fallback removal
+Removed fallback to last valid FEN
+ Result: Almost all frames became invalid due to noisy full-board reconstruction
+
+
+
+5. Frame-level delta gating
+Counted square differences per frame
+
+
+Accepted only 2-square deltas
+ Result: Failed because per-frame detection is too noisy during motion
+
+
+
+6. Stable snapshot detection
+Buffered frames to detect stable boards
+
+
+Compared stable snapshots for legal moves
+ Result: Failed because stable boards were still globally inconsistent
+
+
+
+Core reason these methods failed
+The system tries to reconstruct the entire board every frame. During piece motion, detections overlap, disappear, and reappear, producing illegal intermediate boards. Chess moves cannot be inferred reliably from single frames.
+
+Future plan to get correct PGN output
+Track a persistent chess board state instead of rebuilding it every frame
+
+
+Detect only square-level events (from → to) rather than full boards
+
+
+Require motion completion:
+
+
+Source square empty
+
+
+Destination square stable for multiple frames
+
+
+Confirm moves using chess legality only after motion settles
+
+
+Buffer candidate moves across several frames and select the most consistent one
+
+
+Use full FEN validation only at confirmed move boundaries
+

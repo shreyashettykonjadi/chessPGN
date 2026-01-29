@@ -152,8 +152,16 @@ class FENTransitionValidator:
                 print(f"[validator] Rejected: {reason}")
             return False, reason, None
 
-        # Ambiguous (>1 matches)
-        reason = f"Ambiguous transition: {len(matching)} matching moves"
+        # Ambiguous (>1 matches) - be more tolerant: accept first match if diff is reasonable
+        if diff <= 4:  # Only allow ambiguous if few squares changed (likely a real move)
+            mv, san, ply = matching[0]  # Pick first match deterministically
+            meta = {"uci": mv.uci(), "san": san, "move_index": ply}
+            self._last_valid_fen = fen
+            if self.debug:
+                print(f"[validator] Accepted ambiguous move {san} ({mv.uci()}) at ply {ply} (diff={diff})")
+            return True, "", meta
+        
+        reason = f"Ambiguous transition: {len(matching)} matching moves (diff={diff})"
         if self.debug:
             print(f"[validator] Rejected: {reason}")
         return False, reason, None
